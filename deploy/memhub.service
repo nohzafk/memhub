@@ -1,0 +1,36 @@
+[Unit]
+Description=memhub — shared agent memory over HTTP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=memhub
+Group=memhub
+WorkingDirectory=/opt/memhub
+EnvironmentFile=/etc/memhub/env
+
+# The venv's own uvicorn, not `uv run`: `uv run` would touch the network and the
+# uv cache at boot and wants to mutate /opt/memhub, which ProtectSystem=strict
+# forbids. deploy.sh has already built the venv with `uv sync --frozen`.
+ExecStart=/opt/memhub/.venv/bin/uvicorn memhub.app:app --host 0.0.0.0 --port 8900
+
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=yes
+# memo.py needs a temp dir for its lock file. daylog.py no longer does: it writes
+# its prepend temporary into the store directory itself, which makes the rename
+# atomic instead of a cross-device copy, and is the one path this unit leaves
+# writable anyway. The bash daylog.sh it replaced used mktemp in /tmp.
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+# The one writable path: both stores and the index live here.
+ReadWritePaths=/var/lib/memhub
+
+[Install]
+WantedBy=multi-user.target
