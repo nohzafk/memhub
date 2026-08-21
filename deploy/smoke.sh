@@ -106,11 +106,31 @@ check_memo_note() {
     fi
 }
 
+# Wake is one document delivered in parts, oldest first, so once the store
+# paginates the freshest memory — the marker check_memo_note just wrote — can
+# only ever be at the end of the LAST part. A single call reads part 1 and
+# therefore fails forever after the store crosses one part. Follow the tool's
+# own continuation footer to the end, exactly as the Claude Code session hook
+# does; the cap is slack against a runaway loop, not a budget anyone reaches.
 check_memo_wake() {
     log "memo -g wake"
-    local out
+    local out page doc rest part snapshot count=1
     out="$(run_tool memo wake)" || { bad "wake failed"; return; }
-    if printf '%s' "$out" | field stdout | grep -qF "$MARKER"; then
+    page="$(printf '%s' "$out" | field stdout)"
+    doc="$page"
+    while [[ "$page" == *"Not awake yet. Run:"* ]] && (( count < 8 )); do
+        count=$((count + 1))
+        rest="${page##*Not awake yet. Run: }"
+        rest="${rest%%$'\n'*}"
+        snapshot="${rest##* }"
+        part="${rest% *}"
+        part="${part##* }"
+        [[ "$part" =~ ^[0-9]+$ && "$snapshot" =~ ^[0-9]+$ ]] || break
+        out="$(run_tool memo wake "$part" "$snapshot")" || { bad "wake part $part failed"; return; }
+        page="$(printf '%s' "$out" | field stdout)"
+        doc+=$'\n'"$page"
+    done
+    if printf '%s' "$doc" | grep -qF "$MARKER"; then
         ok "wake shows the new memory"
     else
         bad "wake does not show it"
