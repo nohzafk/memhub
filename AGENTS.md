@@ -52,9 +52,11 @@ has either left the machine or it has not — nothing downstream can undo that. 
 is why the clients refuse to run when `MEMHUB_LOCAL_ROOTS` is unset: an absent
 boundary must not read as "nothing here is confidential".
 
-**Writes are serialised by a lock the tools do not provide.** `memo.py` flocks its
-own store, but `daylog.py` prepends read-modify-write, so two concurrent notes to
-one day would lose one. `runner.py`'s `WRITE_VERBS` takes the lock for those.
+**Writes are serialised at both layers.** `memo.py` and `daylog.py` each flock
+their own store (daylog gained its lock in 2026-08; before that its prepend was
+read-modify-write and the server lock was the only guard). `runner.py`'s
+`WRITE_VERBS` lock still matters on its own: it brackets the recorder's
+snapshot/commit around the write, and it holds whatever a vendored copy does.
 
 **Position is identity.** OptMem numbers memories by position, so two stores that
 both accept writes are two identities that can never be merged. That single fact

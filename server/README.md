@@ -60,7 +60,7 @@ deploying:
 
 ```sh
 sha256sum server/vendor/memo.py     # 3dc120d01be3115ef6267eab4103e7909fc830d6227b549f20991ba999ee9ffb
-sha256sum server/vendor/daylog.py   # 573a345b77485ab7c1601e0ddb815dd9b23cffa1830972e5a2c6d47f15d8473b
+sha256sum server/vendor/daylog.py   # 1bf673372e319fd7734fd8bce4ad40221f70b471115e424375fb080ca560a611
 ```
 
 `memo.py` here is the unpatched upstream file. `deploy.sh` patches `ME` to

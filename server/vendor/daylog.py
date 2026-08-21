@@ -39,6 +39,7 @@ runtime, and the memhub server runs this same file against the shared store with
 no wider closure of its own.
 """
 
+import fcntl
 import os
 import re
 import sys
@@ -165,25 +166,30 @@ def cmd_note(argv):
     # read into memory, and the temporary lands in the store rather than /tmp so
     # the rename is atomic instead of a cross-device copy.
     #
-    # This is still read-modify-write, so two concurrent notes can lose one. That
-    # is what the server's write lock is for (memhub runner.py WRITE_VERBS); the
-    # rename being atomic only guarantees no reader ever sees a half-written day.
+    # The rename only protects readers; the prepend is still read-modify-write, so
+    # two concurrent notes would lose one. The flock serializes writers, the same
+    # way memo.py's locked() does. The server's write lock (memhub runner.py
+    # WRITE_VERBS) covers shared scope only — a note routed local, from a session
+    # under MEMHUB_LOCAL_ROOTS, has only this. Readers take no lock, because
+    # os.replace guarantees they always see a whole file.
     tmp = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=STORE, delete=False
-        ) as handle:
-            tmp = handle.name
-            handle.write(f"<!-- {stamp} -->\n{content}\n\n")
-            if target.is_file():
-                with target.open(encoding="utf-8", errors="replace") as old:
-                    for line in old:
-                        handle.write(line)
-        os.replace(tmp, target)
-    except BaseException:
-        if tmp:
-            Path(tmp).unlink(missing_ok=True)
-        raise
+    with (STORE / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=STORE, delete=False
+            ) as handle:
+                tmp = handle.name
+                handle.write(f"<!-- {stamp} -->\n{content}\n\n")
+                if target.is_file():
+                    with target.open(encoding="utf-8", errors="replace") as old:
+                        for line in old:
+                            handle.write(line)
+            os.replace(tmp, target)
+        except BaseException:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
+            raise
 
     print(f"daylog: recorded to {tilde(target)} ({len(content)} chars)")
     return 0
