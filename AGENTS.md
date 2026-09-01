@@ -52,6 +52,17 @@ has either left the machine or it has not — nothing downstream can undo that. 
 is why the clients refuse to run when `MEMHUB_LOCAL_ROOTS` is unset: an absent
 boundary must not read as "nothing here is confidential".
 
+**The deny list is the second line, and it reads the text.** Routing protects a
+directory, not a topic: work done from a cwd outside `MEMHUB_LOCAL_ROOTS` routes
+shared even when the text is plainly work, and that has happened. So before a
+`note` (or a `nap` line) leaves for the shared store, the client matches it
+against the regexes in `MEMHUB_DENY_SHARED_FILE`
+(default `~/.config/memhub/deny-shared`) and refuses on a hit, naming the flag
+that would have been right. No file means no gate — a machine with nothing to
+keep local says so by not having one. `MEMHUB_ALLOW_SHARED=1` is the deliberate
+override, for the memory that has to name the thing to record the boundary
+itself. The terms live in a file outside the repo because this repo is public.
+
 **Writes are serialised at both layers.** `memo.py` and `daylog.py` each flock
 their own store (daylog gained its lock in 2026-08; before that its prepend was
 read-modify-write and the server lock was the only guard). `runner.py`'s

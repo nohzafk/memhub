@@ -816,3 +816,190 @@ def test_no_footer_when_the_server_sent_no_scopes(tmp_path, stub, token_file):
     r = footer_case(tmp_path, stub, token_file, None)
     assert "-- scope:" not in r.stdout
     assert WAKE in r.stdout
+
+
+# ------------------------------------------------- the deny list
+
+# Routing decides by directory; this decides by text. The two are independent
+# lines, so these tests never set roots to anything but `none` — the point is
+# that a *correctly* shared route is still refused when the text is work.
+
+BOTH_WRITE = [("memo", MEMO), ("daylog", DAYLOG)]
+
+
+def deny_file(tmp_path: Path, body: str) -> dict[str, str]:
+    p = tmp_path / "deny-shared"
+    p.write_text(body, encoding="utf-8")
+    return {"MEMHUB_DENY_SHARED_FILE": str(p)}
+
+
+@pytest.mark.parametrize(("tool", "script"), BOTH_WRITE, ids=BOTH_IDS)
+class TestDenyList:
+    def test_a_matching_shared_note_is_refused_and_never_sent(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        """The whole point: nothing leaves the machine."""
+        r = run_client(
+            script,
+            ["note", "reviewed metastore MR !1101 today"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n"),
+        )
+        assert r.returncode != 0
+        assert stub.requests == []
+        assert "metastore" in r.stderr
+
+    def test_the_refusal_names_the_command_that_would_work(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "metastore again"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n"),
+        )
+        assert f"{tool} -l note" in r.stderr
+
+    def test_the_same_text_still_goes_local(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        """The gate guards one direction. -l is the way out, so it must work."""
+        r = run_client(
+            script,
+            ["-l", "note", "metastore MR !1101"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n"),
+        )
+        assert went_local(r)
+        assert stub.requests == []
+
+    def test_no_deny_file_means_no_gate(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "metastore MR !1101"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra={"MEMHUB_DENY_SHARED_FILE": str(tmp_path / "absent")},
+        )
+        assert r.returncode == 0
+        assert len(stub.requests) == 1
+
+    def test_an_unmatched_note_is_untouched(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "cordis-pi grew a deny list"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n"),
+        )
+        assert r.returncode == 0
+        assert len(stub.requests) == 1
+
+    def test_matching_ignores_case_comments_and_blank_lines(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "the Metastore admin form"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "# terms\n\n   \nmetastore   # the one\n"),
+        )
+        assert r.returncode != 0
+        assert stub.requests == []
+
+    def test_a_regex_matches_as_a_regex(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "closed APP-3373 this morning"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "APP-[0-9]{3,}\n"),
+        )
+        assert r.returncode != 0
+        assert stub.requests == []
+
+    def test_a_broken_pattern_fails_the_write_rather_than_being_skipped(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        """A gate that silently stops gating is worse than no gate."""
+        r = run_client(
+            script,
+            ["note", "harmless"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n[unclosed\n"),
+        )
+        assert r.returncode != 0
+        assert stub.requests == []
+        assert "[unclosed" in r.stderr
+
+    def test_the_override_lets_the_boundary_record_itself_through(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        r = run_client(
+            script,
+            ["note", "boundary verified: metastore must stay local"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra={
+                **deny_file(tmp_path, "metastore\n"),
+                "MEMHUB_ALLOW_SHARED": "1",
+            },
+        )
+        assert r.returncode == 0
+        assert len(stub.requests) == 1
+
+    def test_a_read_is_never_gated(
+        self, tool, script, tmp_path, stub, token_file, local_stubs
+    ):
+        """`recall metastore` is how you find out whether the leak is there."""
+        verb = "recall" if tool == "memo" else "grep"
+        r = run_client(
+            script,
+            [verb, "metastore"],
+            cwd=tmp_path,
+            roots="none",
+            url=stub.url,
+            token=token_file,
+            local_stubs=local_stubs,
+            env_extra=deny_file(tmp_path, "metastore\n"),
+        )
+        assert r.returncode == 0
+        assert len(stub.requests) == 1

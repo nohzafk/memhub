@@ -26,6 +26,7 @@ against both files, which is what keeps them from drifting apart.
 
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -130,6 +131,66 @@ def resolve_scope(argv):
         # one thing that cannot be undone. Choose the recoverable mistake.
         return "local", argv
     return ("local" if under(cwd, roots) else "shared"), argv
+
+
+# ------------------------------------------------------- the deny list
+
+DEFAULT_DENY_FILE = "~/.config/memhub/deny-shared"
+
+# Verbs that carry new text of their own. A read is never gated: `recall
+# <term>` is how you find out whether the leak is already in the store.
+GATED_VERBS = {"note", "nap"}
+
+
+def deny_patterns():
+    """(compiled, source) for every regex in MEMHUB_DENY_SHARED_FILE.
+
+    No file means no gate: a machine with nothing to keep local says so by not
+    having one. A file that cannot be parsed is a hard error, though -- a gate
+    that silently stops gating is worse than no gate at all."""
+    path = os.path.expanduser(
+        os.environ.get("MEMHUB_DENY_SHARED_FILE") or DEFAULT_DENY_FILE
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for n, line in enumerate(lines, 1):
+        src = line.split("#", 1)[0].strip()
+        if not src:
+            continue
+        try:
+            out.append((re.compile(src, re.IGNORECASE), src))
+        except re.error as exc:
+            die(
+                f"{TOOL}: {path} line {n}: {src!r} is not a valid regex ({exc})."
+                " Nothing was written."
+            )
+    return out
+
+
+def guard_shared(argv):
+    """Refuse a shared write whose text names something this machine keeps local.
+
+    resolve_scope decides by directory, and a directory is not a topic: work
+    done from a cwd outside MEMHUB_LOCAL_ROOTS routes shared even when the text
+    is plainly work, which is how it went wrong before. The shared store has no
+    delete path, so the text is read here, before the request exists."""
+    if argv[0] not in GATED_VERBS or os.environ.get("MEMHUB_ALLOW_SHARED") == "1":
+        return
+    text = " ".join(argv[1:])
+    for pattern, src in deny_patterns():
+        hit = pattern.search(text)
+        if hit:
+            die(
+                f'{TOOL}: this text names "{hit.group(0)}" (pattern {src!r}),'
+                " which stays on this machine. Nothing was written.\n"
+                f'  {TOOL} -l {argv[0]} "..."  keeps it local\n'
+                "  MEMHUB_ALLOW_SHARED=1  overrides this, deliberately",
+                2,
+            )
 
 
 # ------------------------------------------------------------ local scope
@@ -408,6 +469,7 @@ def main(argv):
 
     if scope == "local":
         run_local(rest)  # never returns
+    guard_shared(rest)
     return run_shared(rest)
 
 

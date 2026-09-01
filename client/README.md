@@ -22,11 +22,43 @@ fact. Hence the deliberate asymmetry: if the cwd cannot be determined at all and
 local roots are configured, the client routes **local** — a shared memory in the
 local store is recoverable, work text on the server is not.
 
+## The deny list
+
+Rule 2 protects a directory, not a topic. Work done from a cwd outside
+`MEMHUB_LOCAL_ROOTS` routes shared even when the text is plainly work — that is
+not hypothetical, it happened, and the shared store has no delete path to undo
+it with.
+
+So a `note` (and a `nap` line) bound for the shared store is matched against a
+list of regexes first, one per line, `#` starting a comment:
+
+```
+# ~/.config/memhub/deny-shared — never let these reach the shared store
+metastore
+APP-[0-9]{3,}
+talpa
+```
+
+A hit refuses the write, names the term, and prints the command that would have
+been right (`memo -l note …`). Matching is case-insensitive. An unreadable
+pattern is a hard error rather than a skipped line: a gate that silently stops
+gating is worse than none.
+
+**No file means no gate.** A machine with nothing to keep local says so by not
+having one, which is why this does not need a per-machine default. And because
+the terms are the confidential part, the file lives outside this repo — this one
+is public.
+
+`MEMHUB_ALLOW_SHARED=1` overrides it for one command. The boundary record itself
+needs it: to write down which words are work-only, a memory has to name them.
+
 ## Environment
 
 | Variable | Default | Notes |
 |---|---|---|
 | `MEMHUB_URL` | `http://127.0.0.1:8900` | override it; the default is a placeholder |
+| `MEMHUB_DENY_SHARED_FILE` | `~/.config/memhub/deny-shared` | regexes that must never reach the shared store; absent = no gate |
+| `MEMHUB_ALLOW_SHARED` | unset | `1` waives the deny list for one command |
 | `MEMHUB_TOKEN_FILE` | `/run/secrets/memhub-token` | sops-nix on the workstations; a hand-installed `0600` file on the Linux box |
 | `MEMHUB_LOCAL_ROOTS` | **required** | colon-separated paths that stay on this machine, or the literal `none`. Empty entries within the list are ignored |
 | `MEMHUB_MACHINE` | **required** | this machine's **role**: `work`, `personal`, `omarchy`, `nuc`, `cloud`, `phone` |
