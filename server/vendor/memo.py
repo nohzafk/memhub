@@ -445,7 +445,7 @@ def pending(d, T, limit=None):
             todo.append((k * size, (k + 1) * size))
             if limit and len(todo) >= limit:
                 return todo
-            size *= 2
+        size *= 2
     return todo
 
 
