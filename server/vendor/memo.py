@@ -427,8 +427,8 @@ def check(text):
             "separately." % (text.count("\n") + 1))
     n = len(text.encode())
     if n > ENTRY_CHARS:
-        die("Too long: %d bytes, limit %d. Accented characters cost 2 bytes. "
-            "Compress it further." % (n, ENTRY_CHARS))
+        die("Too long: %d bytes, limit %d (non-ASCII/CJK is 2-3 bytes/char). "
+            "Use dense ASCII telegraphic English and compress further." % (n, ENTRY_CHARS))
     return text
 
 
@@ -445,7 +445,7 @@ def pending(d, T, limit=None):
             todo.append((k * size, (k + 1) * size))
             if limit and len(todo) >= limit:
                 return todo
-        size *= 2
+            size *= 2
     return todo
 
 
@@ -479,6 +479,7 @@ def nap_prompt(d, lo, hi, left):
         "1 compression remains" if left == 1 else
         "%d compressions remain" % left)
     return ("Compress memories #%d-%d into one line of at most %d bytes.\n"
+            "Use dense telegraphic English (ASCII only, drop filler words).\n"
             "Keep what has lasting effect, drop what does not. Invent "
             "nothing.\n\n"
             "%s\n%s\n"
