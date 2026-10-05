@@ -21,7 +21,7 @@ uv run python vendor/memo.py init` once, as provisioning does.
 | File | Holds |
 |---|---|
 | `memhub/settings.py` | every path, read from the environment, no filesystem access |
-| `memhub/store.py` | decoding LOG.txt records and daylog entry blocks |
+| `memhub/store.py` | decoding LOG.txt records |
 | `memhub/runner.py` | `/run`: the verb allowlist, the write lock, the subprocess |
 | `memhub/scope.py` | `optmem/META.jsonl`: who wrote a memory, and where it is true |
 | `memhub/app.py` | the endpoints and the bearer token |
@@ -52,23 +52,15 @@ uv run python vendor/memo.py init` once, as provisioning does.
 
 ## Vendored tools
 
-`vendor/memo.py` and `vendor/daylog.py` are copies, never edited here. The
-machine-config repo that installs the clients is the canonical source for both:
-`memo.py` originates upstream at `VictorTaelin/OptMem` and is vendored through
-that repo, and `daylog.py` is written there outright. Verify both before
+`vendor/memo.py` is a copy, never edited here. The machine-config repo that
+installs the client is its canonical source: `memo.py` originates upstream at
+`VictorTaelin/OptMem` and is vendored through that repo. Verify it before
 deploying:
 
 ```sh
 sha256sum server/vendor/memo.py     # 3dc120d01be3115ef6267eab4103e7909fc830d6227b549f20991ba999ee9ffb
-sha256sum server/vendor/daylog.py   # 1bf673372e319fd7734fd8bce4ad40221f70b471115e424375fb080ca560a611
 ```
 
 `memo.py` here is the unpatched upstream file. `deploy.sh` patches `ME` to
 `"memo -g"` at deploy time, so the continuation commands it prints
 route back to the shared store from any machine.
-
-`daylog.py` implements `grep` and `read`, which the server had allowlisted well
-before the tool implemented them. It is Python: `runner.py` runs both vendored tools with
-`sys.executable`, where daylog used to be `bash daylog.sh`. So a vendoring step
-no longer has to preserve a mode bit or a shebang, and the container needs no
-particular bash. See `tests/test_run.py::test_daylog_grep_and_read_return_content`.

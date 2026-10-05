@@ -48,17 +48,9 @@ class Settings:
         return self.data_dir / "optmem"
 
     @property
-    def daily_dir(self) -> Path:
-        return self.data_dir / "daily"
-
-    @property
     def lock_path(self) -> Path:
         return self.data_dir / ".write.lock"
 
     @property
     def memo_py(self) -> Path:
         return self.vendor_dir / "memo.py"
-
-    @property
-    def daylog_py(self) -> Path:
-        return self.vendor_dir / "daylog.py"

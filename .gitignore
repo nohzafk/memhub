@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+# Local backups of store exports. Personal memory text, never committed.
+backups/

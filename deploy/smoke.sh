@@ -29,9 +29,6 @@ main() {
     check_health
     check_memo_note
     check_memo_wake
-    check_daylog_note
-    check_daylog_grep
-    check_daylog_read
 
     echo
     if (( failures )); then
@@ -134,59 +131,6 @@ check_memo_wake() {
         ok "wake shows the new memory"
     else
         bad "wake does not show it"
-    fi
-}
-
-check_daylog_note() {
-    log "daylog -g note"
-    local out
-    out="$(run_tool daylog note "$MARKER")" || { bad "daylog note failed"; return; }
-    if [[ "$(printf '%s' "$out" | field exit_code)" == "0" ]]; then
-        ok "recorded"
-    else
-        bad "recorded"
-    fi
-}
-
-# grep and read are the retrieval half, added to the canonical daylog in
-# the Nix config repo and re-vendored here. Both are real assertions now: an
-# earlier revision only warned, because the vendored copy was the bash one that
-# predated the verbs. A warning was right while the gap was known and expected,
-# and is wrong now — it would let a deploy that silently shipped the old file
-# pass gate G2.
-check_daylog_grep() {
-    log "daylog -g grep"
-    local out code
-    out="$(run_tool daylog grep "smoke test")" || { bad "request failed"; return; }
-    code="$(printf '%s' "$out" | field exit_code)"
-    if [[ "$code" != "0" ]]; then
-        bad "daylog grep exits $code — is the vendored daylog.py the current one?"
-        return
-    fi
-    if printf '%s' "$out" | field stdout | grep -qF "$MARKER"; then
-        ok "grep finds the entry"
-    else
-        bad "grep found nothing"
-    fi
-}
-
-# `read` with no argument means today, which is the day check_daylog_note just
-# wrote to. This is the verb that makes a shared day readable from a workstation at all:
-# it returns content, where `path` returns a filename on the server that the caller
-# cannot open.
-check_daylog_read() {
-    log "daylog -g read"
-    local out code
-    out="$(run_tool daylog read)" || { bad "request failed"; return; }
-    code="$(printf '%s' "$out" | field exit_code)"
-    if [[ "$code" != "0" ]]; then
-        bad "daylog read exits $code — is the vendored daylog.py the current one?"
-        return
-    fi
-    if printf '%s' "$out" | field stdout | grep -qF "$MARKER"; then
-        ok "read returns today in full"
-    else
-        bad "read does not show the entry just written"
     fi
 }
 

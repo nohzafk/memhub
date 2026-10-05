@@ -27,7 +27,7 @@ from .runner import REF_CREATING, BadRequest, RunResult, check, write_lock
 from .runner import run as run_tool
 from .scope import Scope, ScopeRecorder, ScopeStore
 from .settings import Settings
-from .store import daylog_days, memo_count, read_daylog, read_memos
+from .store import memo_count, read_memos
 
 log = logging.getLogger("memhub")
 
@@ -102,7 +102,6 @@ class VerifyResponse(BaseModel):
 class HealthResponse(BaseModel):
     ok: bool
     memo_count: int
-    daylog_days: int
     scope_rows: int
 
 
@@ -135,10 +134,9 @@ def require_token(
 
 
 def known_memories(settings: Settings) -> dict[str, tuple[str, str]]:
-    """Every memory and daylog entry as `{ref: (date, text)}` — what a scope row
-    is verified against."""
-    docs = read_memos(settings.optmem_dir) + read_daylog(settings.daily_dir)
-    return {doc.ref: (doc.date, doc.text) for doc in docs}
+    """Every memory as `{ref: (date, text)}` — what a scope row is verified
+    against."""
+    return {doc.ref: (doc.date, doc.text) for doc in read_memos(settings.optmem_dir)}
 
 
 def scopes_in(settings: Settings, stdout: str) -> list[ScopeHit] | None:
@@ -179,7 +177,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthResponse(
             ok=s.optmem_dir.is_dir(),
             memo_count=memo_count(s.optmem_dir),
-            daylog_days=daylog_days(s.daily_dir),
             scope_rows=len(ScopeStore(s.optmem_dir).rows()),
         )
 
@@ -200,9 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else None
         )
         if scope is not None and (body.tool, verb) in REF_CREATING:
-            recorder = ScopeRecorder(
-                ScopeStore(s.optmem_dir), s.optmem_dir, s.daily_dir, body.tool, scope
-            )
+            recorder = ScopeRecorder(ScopeStore(s.optmem_dir), s.optmem_dir, scope)
         result: RunResult = run_tool(s, body.tool, body.argv, recorder)
 
         scopes = None
@@ -233,15 +228,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         s: Settings = request.app.state.settings
         buffer = io.BytesIO()
         with write_lock(s.lock_path), tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-            for directory in (s.optmem_dir, s.daily_dir):
-                if directory.is_dir():
-                    tar.add(
-                        directory,
-                        arcname=directory.name,
-                        filter=lambda info: (
-                            None if info.name.endswith(".lock") else info
-                        ),
-                    )
+            if s.optmem_dir.is_dir():
+                tar.add(
+                    s.optmem_dir,
+                    arcname=s.optmem_dir.name,
+                    filter=lambda info: None if info.name.endswith(".lock") else info,
+                )
         return Response(
             content=buffer.getvalue(),
             media_type="application/gzip",
@@ -276,9 +268,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else None
             )
             recorder = (
-                ScopeRecorder(
-                    ScopeStore(s.optmem_dir), s.optmem_dir, s.daily_dir, "memo", scope
-                )
+                ScopeRecorder(ScopeStore(s.optmem_dir), s.optmem_dir, scope)
                 if scope is not None
                 else None
             )

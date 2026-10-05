@@ -141,14 +141,6 @@ def test_import_records_a_row_for_every_imported_line(
     assert [r["ref"] for r in rows(settings)] == ["#0", "#1"]
 
 
-def test_a_daylog_note_records_its_stamped_ref(client: TestClient, settings: Settings):
-    assert note(client, "a day happened", tool="daylog")["exit_code"] == 0
-
-    (row,) = rows(settings)
-    assert row["ref"].count("/") == 1  # 2026-08-20/14:03:22
-    assert row["machine"] == "omarchy"
-
-
 def test_no_scope_sent_means_no_row_and_the_write_still_lands(
     client: TestClient, settings: Settings
 ):
@@ -290,6 +282,20 @@ def test_verify_names_unlabelled_memories_and_stale_rows(
 
     assert body["unlabelled"] == ["#1"]
     assert body["unmatched_rows"] == ["#99"]
+
+
+def test_verify_ignores_rows_that_name_no_memory(
+    client: TestClient, settings: Settings
+):
+    """META.jsonl can hold rows for refs outside OptMem, such as the retired
+    day log's `2026-08-20/14:03:22`. They are not memories, so not stale."""
+    note(client, "labelled")
+    meta = settings.optmem_dir / "META.jsonl"
+    row = json.loads(meta.read_text(encoding="utf-8").strip())
+    with meta.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({**row, "ref": "2026-08-20/14:03:22"}) + "\n")
+
+    assert client.get("/verify").json()["unmatched_rows"] == []
 
 
 def test_verify_needs_the_token(anon: TestClient):

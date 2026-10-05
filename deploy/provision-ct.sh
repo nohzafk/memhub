@@ -167,7 +167,6 @@ init_store() {
         ct_sh "sed -i 's|Edit with \`[^\`]*\`|Edit with \`memo -g config NAME=VALUE\`|' \
             $DATA_DIR/optmem/config"
     fi
-    ct_sh "runuser -u $SERVICE_USER -- mkdir -p $DATA_DIR/daily"
 }
 
 add_to_restic() {

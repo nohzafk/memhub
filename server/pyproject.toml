@@ -1,7 +1,7 @@
 [project]
 name = "memhub"
 version = "0.1.0"
-description = "Shared agent memory service: OptMem memo + daylog over HTTP"
+description = "Shared agent memory service: OptMem memo over HTTP"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

@@ -1,6 +1,6 @@
 """Fixtures: a real store in a tmp dir.
 
-The tests drive the vendored `memo.py` and `daylog.py` for real — they are the
+The tests drive the vendored `memo.py` for real — it is the
 whole point of the passthrough design, and mocking them would test nothing.
 """
 
@@ -44,7 +44,6 @@ def settings(tmp_path: Path, vendor_dir: Path) -> Settings:
         check=True,
         capture_output=True,
     )
-    s.daily_dir.mkdir()
     return s
 
 

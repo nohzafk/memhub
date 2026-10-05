@@ -1,13 +1,11 @@
 # client
 
-The routed `memo` and `daylog`: the two commands a machine actually installs.
+The routed `memo`: the command a machine actually installs.
 
-Two files, stdlib only, no imports of each other. That is a vendoring
-requirement, not a style choice: the Nix config repo wraps each file on its own in Nix
-and the second config repo copies each into place, so neither may depend on a sibling.
-The routing core is therefore duplicated, and
-`server/tests/test_client.py` runs the whole scope matrix against **both** files
-so the copies cannot drift.
+One file, stdlib only. That is a vendoring requirement, not a style choice: the
+Nix config repo wraps it on its own in Nix and the second config repo copies it
+into place, so it may not depend on a sibling. `server/tests/test_client.py`
+runs the whole scope matrix against it.
 
 ## Routing
 
@@ -64,7 +62,6 @@ needs it: to write down which words are work-only, a memory has to name them.
 | `MEMHUB_MACHINE` | **required** | this machine's **role**: `work`, `personal`, `omarchy`, `nuc`, `cloud`, `phone` |
 | `MEMHUB_ACTOR` | unset | which agent is writing: `claude-code`, `codex`, … |
 | `MEMHUB_MEMO_PY` | `memo.py` beside the client | the vendored tool for local scope |
-| `MEMHUB_DAYLOG_PY` | `daylog.py` beside the client | same |
 
 Per machine:
 
@@ -156,7 +153,3 @@ canonical ids.
   on stderr, exit 1. A write adds that it was *not* recorded and how to record it
   locally. The connect probe is bounded at 2s so a SessionStart hook on a machine
   whose server is off costs two seconds, not thirty.
-- **`daylog path`** in shared scope prints a path on the server and exits 0, which
-  the calling machine cannot open. The client cannot fix it either: the tool sees
-  only `DAYLOG_DIR` and answers for the store it was given. Use `daylog -g read
-  DATE`, which returns content and so crosses the boundary a path cannot.

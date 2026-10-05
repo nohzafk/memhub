@@ -1,16 +1,12 @@
-"""The routed clients.
+"""The routed client.
 
-Two properties matter here more than anything else in the repo.
+The property that matters here more than anything else in the repo:
 
-The first is that the routing rule is the confidentiality boundary: if a cwd
+The routing rule is the confidentiality boundary: if a cwd
 under MEMHUB_LOCAL_ROOTS ever resolves to "shared", work text leaves the machine
 and no later component can call it back. So the matrix below is exhaustive about
 the cases that decide it — prefix collisions, symlinks, trailing slashes, stray
 colons.
-
-The second is that both clients must resolve scope identically. They carry a
-duplicated core because each is vendored as a single file, so every routing test
-runs against both; a change to one alone fails here.
 """
 
 from __future__ import annotations
@@ -28,11 +24,10 @@ import pytest
 
 CLIENT_DIR = Path(__file__).resolve().parents[2] / "client"
 MEMO = CLIENT_DIR / "memo-client.py"
-DAYLOG = CLIENT_DIR / "daylog-client.py"
 
-# Every routing test runs against both clients: (tool, script, a read verb).
-BOTH = [("memo", MEMO, "wake"), ("daylog", DAYLOG, "recent")]
-BOTH_IDS = ["memo", "daylog"]
+# Routing tests are parametrised by (tool, script, a read verb).
+BOTH = [("memo", MEMO, "wake")]
+BOTH_IDS = ["memo"]
 
 # An address that accepts nothing, for the "shared but the server is off" branch.
 DEAD_URL = "http://127.0.0.1:1"
@@ -117,16 +112,7 @@ def local_stubs(tmp_path: Path) -> dict[str, Path]:
         "sys.exit(7)\n",
         encoding="utf-8",
     )
-    # Python, not bash, and no exec bit: the client runs both stubs as
-    # `sys.executable <path>`, so neither needs a shebang or a mode of its own.
-    daylog = tmp_path / "daylog.py"
-    daylog.write_text(
-        "import os, sys\n"
-        "print('LOCAL daylog', os.environ.get('DAYLOG_DIR'), sys.argv[1:])\n"
-        "sys.exit(7)\n",
-        encoding="utf-8",
-    )
-    return {"memo": memo, "daylog": daylog}
+    return {"memo": memo}
 
 
 def run_client(
@@ -157,7 +143,6 @@ def run_client(
         env["MEMHUB_TOKEN_FILE"] = str(token)
     if local_stubs is not None:
         env["MEMHUB_MEMO_PY"] = str(local_stubs["memo"])
-        env["MEMHUB_DAYLOG_PY"] = str(local_stubs["daylog"])
     return subprocess.run(
         [sys.executable, str(script), *argv],
         cwd=str(cwd),
@@ -365,15 +350,6 @@ def test_local_memo_gets_the_default_store_and_argv(tmp_path, local_stubs):
     assert "['note', 'a fact']" in r.stdout
 
 
-def test_local_daylog_gets_the_default_store_and_argv(tmp_path, local_stubs):
-    r = run_client(
-        DAYLOG, ["-l", "note", "a day"], cwd=tmp_path, local_stubs=local_stubs
-    )
-    assert r.returncode == 7
-    assert ".agents/memory/daily" in r.stdout
-    assert "['note', 'a day']" in r.stdout
-
-
 def test_a_missing_local_tool_says_which_variable_to_set(tmp_path):
     r = run_client(MEMO, ["-l", "wake"], cwd=tmp_path)
     assert r.returncode == 1
@@ -396,14 +372,6 @@ def test_shared_run_sends_tool_and_argv_with_the_token(tmp_path, stub, token_fil
     body = stub.requests[0]["body"]
     assert (body["tool"], body["argv"]) == ("memo", ["note", "a fact"])
     assert stub.requests[0]["auth"] == "Bearer sekret-token"
-
-
-def test_shared_daylog_sends_its_own_tool_name(tmp_path, stub, token_file):
-    run_client(
-        DAYLOG, ["-g", "recent", "2"], cwd=tmp_path, url=stub.url, token=token_file
-    )
-    body = stub.requests[0]["body"]
-    assert (body["tool"], body["argv"]) == ("daylog", ["recent", "2"])
 
 
 def test_the_tools_exit_code_and_stderr_come_through(tmp_path, stub, token_file):
@@ -463,9 +431,7 @@ def test_an_unreachable_server_fails_a_read_softly(
     assert "NOT recorded" not in r.stderr
 
 
-@pytest.mark.parametrize(
-    ("tool", "script"), [("memo", MEMO), ("daylog", DAYLOG)], ids=BOTH_IDS
-)
+@pytest.mark.parametrize(("tool", "script"), [("memo", MEMO)], ids=BOTH_IDS)
 def test_an_unreachable_server_tells_a_writer_what_to_do(
     tool, script, tmp_path, token_file
 ):
@@ -824,7 +790,7 @@ def test_no_footer_when_the_server_sent_no_scopes(tmp_path, stub, token_file):
 # lines, so these tests never set roots to anything but `none` — the point is
 # that a *correctly* shared route is still refused when the text is work.
 
-BOTH_WRITE = [("memo", MEMO), ("daylog", DAYLOG)]
+BOTH_WRITE = [("memo", MEMO)]
 
 
 def deny_file(tmp_path: Path, body: str) -> dict[str, str]:

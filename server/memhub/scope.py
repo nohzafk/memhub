@@ -229,10 +229,14 @@ class ScopeStore:
         that have no row."""
         rows, epoch = self.rows(), self.epoch()
         matched = self.lookup(known)
+        # Only `#N` refs name memories. Rows with any other ref describe entries
+        # outside OptMem and are neither stale nor auditable here.
         stale = [
             ref
             for ref, row in rows.items()
-            if ref not in matched and (row.get("epoch") == epoch or ref in known)
+            if ref.startswith("#")
+            and ref not in matched
+            and (row.get("epoch") == epoch or ref in known)
         ]
         return {
             "unmatched_rows": sorted(stale),
@@ -252,29 +256,19 @@ class ScopeRecorder:
         self,
         store: ScopeStore,
         optmem_dir: Path,
-        daily_dir: Path,
-        tool: str,
         scope: Scope,
     ):
         self.store = store
         self.optmem_dir = optmem_dir
-        self.daily_dir = daily_dir
-        self.tool = tool
         self.scope = scope
 
-    def snapshot(self) -> object:
-        from .store import memo_count, read_daylog
+    def snapshot(self) -> int:
+        from .store import memo_count
 
-        if self.tool == "memo":
-            return memo_count(self.optmem_dir)
-        return {doc.ref for doc in read_daylog(self.daily_dir)}
+        return memo_count(self.optmem_dir)
 
-    def commit(self, snapshot: object) -> int:
-        from .store import read_daylog, read_memos
+    def commit(self, snapshot: int) -> int:
+        from .store import read_memos
 
-        if self.tool == "memo":
-            new = read_memos(self.optmem_dir, int(snapshot))
-        else:
-            seen = snapshot if isinstance(snapshot, set) else set()
-            new = [doc for doc in read_daylog(self.daily_dir) if doc.ref not in seen]
+        new = read_memos(self.optmem_dir, snapshot)
         return self.store.record([(d.ref, d.date, d.text, self.scope) for d in new])

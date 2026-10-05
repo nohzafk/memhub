@@ -18,10 +18,8 @@ execs the vendored memo.py, replacing this process, so output and exit codes pas
 through untouched.
 
 Stdlib only, on purpose: the Nix config repo vendors this file into a Nix wrapper and
-the second config repo installs it directly, neither with a dependency closure. The core
-below is duplicated in daylog-client.py for the same reason — a vendored single
-file cannot import a sibling. server/tests/test_client.py runs the scope matrix
-against both files, which is what keeps them from drifting apart.
+the second config repo installs it directly, neither with a dependency closure.
+server/tests/test_client.py runs the scope matrix against it.
 """
 
 import json

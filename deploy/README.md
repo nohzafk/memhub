@@ -29,7 +29,8 @@ that answers plausible nonsense.
 | Path | Holds | Backed up |
 |---|---|---|
 | `/opt/memhub` | the release: `memhub/`, `vendor/`, `.venv` | no — redeployable |
-| `/var/lib/memhub/optmem`, `daily/` | **the stores** | yes — this is the only irreplaceable data |
+| `/var/lib/memhub/optmem` | **the store** | yes — this is the only irreplaceable data |
+| `/var/lib/memhub/daily` | the retired day log, no longer served | yes — kept as an archive |
 | `/etc/memhub/token` | the bearer token | no |
 
 ## Things that will bite

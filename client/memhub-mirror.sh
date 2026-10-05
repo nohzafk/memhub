@@ -19,7 +19,7 @@
 # NOT write into the mirror: that is exactly the fork this design avoids.
 #
 # Promoting a mirror to be the store, if the server is gone for good:
-#   1. Copy <mirror>/optmem and <mirror>/daily into the new server's data dir.
+#   1. Copy <mirror>/optmem into the new server's data dir.
 #   2. chown them to the service user and make them writable again, then start it.
 #   3. Every memory keeps its id, so TREE/ and META.jsonl stay valid. That is
 #      what a byte copy buys, and what a filtered copy could not.
@@ -39,7 +39,7 @@ die() {
 # A mirror is only worth having if it is whole. Every check answers one question:
 # would this still work if it were promoted to be the store?
 verify_tree() {
-    local dir="$1" log="$1/optmem/LOG.txt" size records days
+    local dir="$1" log="$1/optmem/LOG.txt" size records
 
     [[ -f "$log" ]] || { echo "no optmem/LOG.txt"; return 1; }
     # GNU stat on Linux and under the Nix wrapper; BSD stat when the script is
@@ -64,8 +64,7 @@ for line in open(sys.argv[1], encoding="utf-8"):
         return 1
     fi
 
-    days="$(find "$dir/daily" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)"
-    echo "$records memories, $days day files"
+    echo "$records memories"
 }
 
 if [[ "${1:-}" == "--verify" ]]; then

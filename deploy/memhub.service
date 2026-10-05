@@ -19,10 +19,7 @@ Restart=on-failure
 RestartSec=3
 
 NoNewPrivileges=yes
-# memo.py needs a temp dir for its lock file. daylog.py no longer does: it writes
-# its prepend temporary into the store directory itself, which makes the rename
-# atomic instead of a cross-device copy, and is the one path this unit leaves
-# writable anyway. The bash daylog.sh it replaced used mktemp in /tmp.
+# memo.py needs a temp dir for its lock file.
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes

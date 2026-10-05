@@ -1,7 +1,7 @@
 """`POST /run` — command passthrough to the vendored tools.
 
 The transport is argv, not a per-verb REST API: the server executes
-`memo.py` and `daylog.py` against the server-side stores, so wake pagination,
+`memo.py` against the server-side store, so wake pagination,
 nap prompts, flock, import validation and crash repair all come from the tool
 itself and cannot drift from it.
 
@@ -25,9 +25,8 @@ from .settings import Settings
 MEMO_VERBS = {"wake", "note", "nap", "recall", "zoom", "forget", "config", "import"}
 # `memo init` is deliberately absent: the store is created once, at
 # provisioning. Serving it would let a typo create a second identity.
-DAYLOG_VERBS = {"note", "recent", "path", "grep", "read"}
 
-VERBS = {"memo": MEMO_VERBS, "daylog": DAYLOG_VERBS}
+VERBS = {"memo": MEMO_VERBS}
 
 # Verbs that change a store, and so take the write lock.
 WRITE_VERBS = {
@@ -36,12 +35,11 @@ WRITE_VERBS = {
     ("memo", "import"),
     ("memo", "forget"),
     ("memo", "config"),
-    ("daylog", "note"),
 }
 
 # Verbs that create a new ref, and so a new scope row. `nap` writes summaries
 # into TREE/, which is derived from LOG.txt and is not a memory of its own.
-REF_CREATING = {("memo", "note"), ("memo", "import"), ("daylog", "note")}
+REF_CREATING = {("memo", "note"), ("memo", "import")}
 
 TIMEOUT = 60.0
 
@@ -62,7 +60,7 @@ class RunResult:
 def check(tool: str, argv: list[str]) -> str:
     """Validate a call and return its verb."""
     if tool not in VERBS:
-        raise BadRequest(f"unknown tool {tool!r}; expected one of: memo, daylog")
+        raise BadRequest(f"unknown tool {tool!r}; expected: memo")
     if not argv:
         raise BadRequest(f"{tool}: no verb; expected one of: {_listed(tool)}")
     verb = argv[0]
@@ -81,11 +79,9 @@ def _listed(tool: str) -> str:
 def write_lock(path: Path):
     """One writer at a time, across threads and across processes.
 
-    `memo.py` flocks its own store already. The lock exists for `daylog.py`,
-    whose prepend is read-modify-write and would otherwise lose an entry when two
-    sessions note into the same day at the same moment. Its rename is atomic, so
-    no reader ever sees half a day — but two writers still race, and this is what
-    serialises them.
+    `memo.py` flocks its own store already. This lock brackets the scope
+    recorder's snapshot and commit around the write, and `/export` takes it so
+    a note landing mid-read cannot produce a torn `LOG.txt`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with _thread_lock, path.open("a") as fh:
@@ -104,17 +100,8 @@ def run(settings: Settings, tool: str, argv: list[str], recorder=None) -> RunRes
     what a concurrent write created.
     """
     verb = check(tool, argv)
-    # Both tools are Python now, so the interpreter is the same and only the script
-    # and the store variable differ. daylog was a bash script until it grew `grep`
-    # and `read`, and this branch used to run `bash daylog.sh` — the asymmetry is
-    # gone, along with any dependence on what bash the container happens to have.
-    if tool == "memo":
-        script = settings.memo_py
-        env_extra = {"MEMORY_DIR": str(settings.optmem_dir)}
-    else:
-        script = settings.daylog_py
-        env_extra = {"DAYLOG_DIR": str(settings.daily_dir)}
-    cmd = [sys.executable, str(script), *argv]
+    env_extra = {"MEMORY_DIR": str(settings.optmem_dir)}
+    cmd = [sys.executable, str(settings.memo_py), *argv]
 
     if (tool, verb) in WRITE_VERBS:
         with write_lock(settings.lock_path):

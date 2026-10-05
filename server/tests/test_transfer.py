@@ -37,7 +37,6 @@ def test_export_is_a_byte_copy_of_the_store(client: TestClient, settings: Settin
     client.post(
         "/run", json={"tool": "memo", "argv": ["note", "a fact"], "scope": OMARCHY}
     )
-    client.post("/run", json={"tool": "daylog", "argv": ["note", "a day"]})
 
     body = client.get("/export").content
 
@@ -47,7 +46,7 @@ def test_export_is_a_byte_copy_of_the_store(client: TestClient, settings: Settin
         files["optmem/META.jsonl"] == (settings.optmem_dir / "META.jsonl").read_bytes()
     )
     assert "optmem/config" in files
-    assert any(name.startswith("daily/") and name.endswith(".md") for name in files)
+    assert not any(name.startswith("daily/") for name in files)
 
 
 def test_export_leaves_the_lock_file_out(client: TestClient, settings: Settings):

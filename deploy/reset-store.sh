@@ -3,7 +3,7 @@
 #
 #   deploy/reset-store.sh --yes
 #
-# This DESTROYS every memory and every day file on the server. It exists because
+# This DESTROYS every memory on the server. It exists because
 # OptMem is append-only: a memory cannot be deleted, only compressed, so the only
 # way to remove one is to start the identity over.
 #
@@ -31,11 +31,8 @@ main() {
     log "stopping memhub (the store must not move under a live writer)"
     ct_sh "systemctl stop memhub.service"
 
-    log "removing the store and the day files"
+    log "removing the store"
     ct_sh "rm -rf $DATA_DIR/optmem"
-    # daily/ holds one file per day, plain markdown. Remove the dated logs and
-    # leave anything a human put there.
-    ct_sh "rm -f $DATA_DIR/daily/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md"
 
     log "creating a fresh store"
     ct_push "$(repo_root)/server/vendor/memo.py" /tmp/memo.py 0755
@@ -43,7 +40,6 @@ main() {
     ct_sh "rm -f /tmp/memo.py"
     ct_sh "sed -i 's|Edit with \`[^\`]*\`|Edit with \`memo -g config NAME=VALUE\`|' \\
         $DATA_DIR/optmem/config"
-    ct_sh "runuser -u $SERVICE_USER -- mkdir -p $DATA_DIR/daily"
 
     log "starting memhub"
     ct_sh "systemctl start memhub.service"
