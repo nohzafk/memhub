@@ -161,7 +161,7 @@ init_store() {
     else
         log "creating the rules store"
         ct_push "$(repo_root)/server/memhub/rules.py" /tmp/rules.py 0755
-        ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/rules python3 /tmp/rules.py init"
+        ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/rules python3 -I /tmp/rules.py init"
         ct_sh "rm -f /tmp/rules.py"
     fi
 }
