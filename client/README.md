@@ -31,6 +31,10 @@ local store is recoverable, work text on the server is not.
 | `drop <id> ["<why>"]` | retire a rule; the reason goes in the commit message | yes |
 | `merge <id>,<id>[,…] "<text>"` | replace the listed rules with one new rule | yes |
 
+`memo -l init` creates this machine's local store at `MEMORY_DIR`. It needs the
+explicit `-l`: `memo init` and `memo -g init` are usage errors (exit 2), because
+the hub's store is created at provisioning.
+
 Any other verb is a usage error (exit 2) and goes nowhere. The tool behind both
 scopes is the rules store (`rules.py`); its contract is
 [the design](../docs/rules-store.md).

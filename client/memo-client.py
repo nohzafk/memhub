@@ -64,6 +64,7 @@ USAGE = """memo — durable rules, routed by path.
 
   memo -g <cmd>    the shared memory on the server
   memo -l <cmd>    this machine's local memory
+  memo -l init     create this machine's local store
 
 With neither flag: a cwd under MEMHUB_LOCAL_ROOTS is local, everything else is
 shared. MEMHUB_URL is %s.""" % (os.environ.get("MEMHUB_URL") or DEFAULT_URL)
@@ -665,6 +666,17 @@ def main(argv):
     if not rest:
         print(USAGE)
         return 0
+
+    if rest[0] == "init":
+        # Only an explicit -l: a cwd that happens to route local must not
+        # create a store, and the hub's store is made at provisioning.
+        if argv[0] not in ("-l", "--local"):
+            die(
+                "memo: init is local-only; the hub is initialised at provisioning."
+                f"\n\n{USAGE}",
+                2,
+            )
+        run_local(rest)  # never returns
 
     if rest[0] not in VERBS:
         die(f"memo: unknown verb {rest[0]!r}.\n\n{USAGE}", 2)

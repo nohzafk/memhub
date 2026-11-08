@@ -406,7 +406,7 @@ def test_help_lists_exactly_the_six_verbs(tmp_path):
     assert listed == VERBS
 
 
-@pytest.mark.parametrize("verb", ["nap", "zoom", "forget", "config", "import", "init"])
+@pytest.mark.parametrize("verb", ["nap", "zoom", "forget", "config", "import"])
 @pytest.mark.parametrize("flag", ["-g", "-l"])
 def test_a_retired_verb_gets_the_usage_error(
     tmp_path, stub, token_file, local_stubs, verb, flag
@@ -422,6 +422,41 @@ def test_a_retired_verb_gets_the_usage_error(
     assert r.returncode == 2
     assert f"unknown verb {verb!r}" in r.stderr
     assert "memo -g <cmd>" in r.stderr  # the usage follows
+    assert stub.requests == []
+    assert not went_local(r)
+
+
+def test_local_init_execs_the_tool(tmp_path, local_stubs):
+    for flag in ("-l", "--local"):
+        r = run_client(MEMO, [flag, "init"], cwd=tmp_path, local_stubs=local_stubs)
+        assert r.returncode == 7
+        assert ".agents/memory/rules ['init']" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "argv, roots",
+    [
+        (["-g", "init"], None),
+        (["--shared", "init"], None),
+        (["init"], None),
+        # A cwd that routes local is not an explicit -l.
+        (["init"], "."),
+    ],
+)
+def test_init_without_the_local_flag_is_refused(
+    tmp_path, stub, token_file, local_stubs, argv, roots
+):
+    r = run_client(
+        MEMO,
+        argv,
+        cwd=tmp_path,
+        roots=str(tmp_path) if roots else None,
+        url=stub.url,
+        token=token_file,
+        local_stubs=local_stubs,
+    )
+    assert r.returncode == 2
+    assert "init is local-only; the hub is initialised at provisioning" in r.stderr
     assert stub.requests == []
     assert not went_local(r)
 

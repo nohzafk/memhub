@@ -134,7 +134,7 @@ in id order.
 
 A machine with `MEMHUB_LOCAL_ROOTS` keeps a local store in the same format
 (D1), and `-g`, `-l` and the cwd route exactly as before; the server still never
-learns the cwd. The deny list still reads every `note`, `edit` and `merge` text
+learns the cwd. The local store is created with `memo -l init`. The deny list still reads every `note`, `edit` and `merge` text
 bound for the shared store, and now a `drop`'s reason too. `memhub-promote` appends local rules to the shared
 store with new ids (position was never identity here, so this is an append, not
 a merge of identities) and archives the local store as before.
