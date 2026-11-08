@@ -9,7 +9,9 @@ import pytest
 from conftest import TOKEN
 from fastapi.testclient import TestClient
 
-from memhub import runner
+from memhub import app as app_module
+from memhub import rules, runner
+from memhub.scope import Scope, ScopeRecorder, ScopeStore
 from memhub.settings import Settings
 
 
@@ -143,6 +145,31 @@ def test_recall_keeps_the_tools_exit_codes_and_utf8(client: TestClient):
     assert ok["exit_code"] == 0
     assert "ünïcode" in ok["stdout"]
     assert run(client, "memo", "recall", "(").json()["exit_code"] == 2
+
+
+def test_an_edit_between_the_read_and_the_annotation_never_mislabels(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+):
+    """The annotation describes the text returned. An edit from another
+    machine, landing after the wake was read, must not lend its scope to the
+    old text."""
+    run(client, "memo", "note", "#x old", scope={"machine": "nuc"})
+    real = app_module.run_tool
+
+    def wake_then_edit(*args, **kwargs):
+        result = real(*args, **kwargs)
+        rules.edit(settings.rules_dir, 1, "#x new")
+        recorder = ScopeRecorder(
+            ScopeStore(settings.rules_dir), settings.rules_dir, Scope(machine="work")
+        )
+        recorder.commit("Edited #1.\n")
+        return result
+
+    monkeypatch.setattr(app_module, "run_tool", wake_then_edit)
+    body = run(client, "memo", "wake").json()
+
+    assert "#x old" in body["stdout"]
+    assert not any(h["machine"] == "work" for h in body["scopes"] or [])
 
 
 def test_unknown_tool_is_400(client: TestClient):

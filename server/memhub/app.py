@@ -31,11 +31,11 @@ from .settings import Settings
 
 log = logging.getLogger("memhub")
 
-# A rule as `memo` prints it, at the start of a line. Matching is read-only:
-# stdout is never rewritten — the client appends a footer — so a pattern that
-# finds nothing costs a missing annotation and never a mangled rule. A wake's
-# `## <tag>` group lines do not match.
-REF_RE = re.compile(r"^#(\d+) ", re.MULTILINE)
+# A rule as `memo` prints it: one whole line, `#<id> <date> <text>`. Matching
+# is read-only: stdout is never rewritten — the client appends a footer — so a
+# line that does not match costs a missing annotation and never a mangled rule.
+# A wake's `## <tag>` group lines and its footer do not match.
+RULE_LINE_RE = re.compile(r"#(\d+) (\d{4}-\d{2}-\d{2}) (.*)")
 
 
 class ScopeModel(BaseModel):
@@ -127,13 +127,19 @@ def known_rules(settings: Settings) -> dict[str, tuple[str, str]]:
 
 
 def scopes_in(settings: Settings, stdout: str) -> list[ScopeHit] | None:
-    """Scope for the rules `stdout` names, or None when it names none."""
-    ids = {int(m.group(1)) for m in REF_RE.finditer(stdout)}
-    if not ids:
+    """Scope for the rules `stdout` prints, or None when it prints none.
+
+    The rules are read from `stdout` itself, not from the store again: a write
+    landing between the read that produced the output and a second read would
+    otherwise label the text returned with the scope of the text that replaced
+    it."""
+    wanted: dict[str, tuple[str, str]] = {}
+    for line in stdout.split("\n"):
+        m = RULE_LINE_RE.fullmatch(line)
+        if m is not None:
+            wanted[f"#{int(m.group(1))}"] = (m.group(2), m.group(3))
+    if not wanted:
         return None
-    wanted = {
-        ref: dt for ref, dt in known_rules(settings).items() if int(ref[1:]) in ids
-    }
     found = ScopeStore(settings.rules_dir).lookup(wanted)
     if not found:
         return None
