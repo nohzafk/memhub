@@ -34,9 +34,10 @@ WRITE_VERBS = {
     ("memo", "merge"),
 }
 
-# Verbs that create a new id, and so a new scope row. `edit` and `drop` keep
-# or retire an id; they create none.
-REF_CREATING = {("memo", "note"), ("memo", "merge")}
+# Verbs that write a scope row: `note` and `merge` for the id they create,
+# `edit` for the id whose text it replaced (the row's fingerprint is of the
+# text). `drop` retires an id and writes none.
+SCOPE_RECORDING = {("memo", "note"), ("memo", "merge"), ("memo", "edit")}
 
 _thread_lock = threading.Lock()
 

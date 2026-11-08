@@ -54,6 +54,15 @@ def test_init_creates_a_repo_with_one_commit(store: Path):
     assert git(store, "status", "--porcelain") == ""
 
 
+def test_init_excludes_the_lock_and_the_scope_metadata(store: Path):
+    """The server keeps META.jsonl and EPOCH beside RULES.txt; the store's git
+    must never show them, or the lock, as untracked."""
+    for name in (".lock", "META.jsonl", "EPOCH"):
+        (store / name).write_text("x\n", encoding="utf-8")
+
+    assert git(store, "status", "--porcelain", "--untracked-files=all") == ""
+
+
 def test_init_refuses_an_existing_store(store: Path):
     with pytest.raises(RulesError) as e:
         rules.init(store)

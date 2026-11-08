@@ -46,16 +46,19 @@ code and stderr.
 
 `rules/META.jsonl` records **machine, project, actor** and an
 **applicability** for every rule — out of band, never in the rule's text. It
-sits beside `RULES.txt` but is not tracked by the store's git repository.
+sits beside `RULES.txt`, with the store's `EPOCH`; both travel with
+`/export`, and the store's git repository excludes them.
 
 - Written on `/run` when the client sends `scope` with a `note` or `merge`,
   inside the write's own lock, for the id the tool printed (`Saved as #<id>.`).
-  `edit` and `drop` write no row.
+  An `edit` with scope writes a new row for its id (`Edited #<id>.`): the
+  fingerprint of the new text, the editing request's scope; the last row of a
+  ref wins. `drop` writes no row.
 - Read back on `/run` as `scopes`, for the footer the client appends. The tool's
   own stdout is never rewritten.
 - `GET /verify` reports rows that match no rule, and rules with no row. A
-  dropped rule's row, and the row of a rule whose text was edited, are reported
-  there.
+  dropped rule's row is reported there, and so is the row of a rule edited
+  without scope.
 - Every row carries a fingerprint of the rule's date and text, and the store's
   epoch. A mismatch on either **suppresses the annotation** rather than
   printing a stale one.

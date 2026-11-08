@@ -32,6 +32,9 @@ from pathlib import Path
 RULES = "RULES.txt"
 NEXT = "NEXT"
 LOCK = ".lock"
+# Files in the store directory that git must never show: the lock, and the
+# server's scope metadata (scope.META_NAME, scope.EPOCH_NAME).
+EXCLUDED = (LOCK, "META.jsonl", "EPOCH")
 
 MAX_TEXT_BYTES = 280
 BUDGET_RULES = 120
@@ -272,8 +275,10 @@ def init(d: Path | str) -> None:
         _git(d, "init", "-q")
         exclude = d / ".git" / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
+        # The server's scope metadata (scope.py) lives here too and travels
+        # with /export, but it is not the store's history.
         with exclude.open("a", encoding="utf-8") as f:
-            f.write(f"{LOCK}\n")
+            f.write("".join(f"{name}\n" for name in EXCLUDED))
         (d / RULES).write_text("", encoding="utf-8")
         (d / NEXT).write_text("1\n", encoding="utf-8")
         _commit(d, "init")

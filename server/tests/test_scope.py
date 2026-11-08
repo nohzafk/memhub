@@ -147,21 +147,17 @@ def test_merge_records_one_row_for_the_new_id(client: TestClient, settings: Sett
     ]
 
 
-def test_edit_and_drop_record_no_row(client: TestClient, settings: Settings):
-    """They create no id. The edited rule's old row stops matching and the
-    dropped rule's row matches nothing; /verify reports both."""
-    note(client, "to be edited")
+def test_drop_records_no_row(client: TestClient, settings: Settings):
+    """A drop retires an id: its row matches nothing and /verify reports it."""
     note(client, "to be dropped")
-    for argv in (["edit", "1", "edited"], ["drop", "2"]):
-        body = client.post(
-            "/run", json={"tool": "memo", "argv": argv, "scope": OMARCHY}
-        ).json()
-        assert body["exit_code"] == 0, argv
+    body = client.post(
+        "/run", json={"tool": "memo", "argv": ["drop", "1"], "scope": OMARCHY}
+    ).json()
+    assert body["exit_code"] == 0
 
-    assert [r["ref"] for r in rows(settings)] == ["#1", "#2"]
+    assert [r["ref"] for r in rows(settings)] == ["#1"]
     report = client.get("/verify").json()
-    assert report["unmatched_rows"] == ["#1", "#2"]
-    assert report["unlabelled"] == ["#1"]
+    assert (report["unmatched_rows"], report["unlabelled"]) == (["#1"], [])
 
 
 def test_no_scope_sent_means_no_row_and_the_write_still_lands(
@@ -305,6 +301,50 @@ def test_verify_names_unlabelled_memories_and_stale_rows(
 
     assert body["unlabelled"] == ["#2"]
     assert body["unmatched_rows"] == ["#99"]
+
+
+def edit(client: TestClient, rule_id: str, text: str, scope: dict | None = WORK):
+    body: dict = {"tool": "memo", "argv": ["edit", rule_id, text]}
+    if scope is not None:
+        body["scope"] = scope
+    return client.post("/run", json=body).json()
+
+
+def test_an_edit_re_records_its_row_and_verify_stays_clean(
+    client: TestClient, settings: Settings
+):
+    note(client, "the first wording", scope=OMARCHY)
+
+    assert edit(client, "1", "the corrected wording")["exit_code"] == 0
+
+    body = client.get("/verify").json()
+    assert (body["rows"], body["unmatched_rows"], body["unlabelled"]) == (1, [], [])
+    last = rows(settings)[-1]
+    assert last["ref"] == "#1"
+    assert last["fp"] == fingerprint(last["date"], "the corrected wording")
+    assert (last["machine"], last["project"]) == ("work", "memhub")
+    woke = client.post("/run", json={"tool": "memo", "argv": ["wake"]}).json()
+    assert [(s["ref"], s["machine"]) for s in woke["scopes"]] == [("#1", "work")]
+
+
+def test_an_edit_without_scope_leaves_the_old_row_reported(
+    client: TestClient, settings: Settings
+):
+    note(client, "the first wording")
+
+    assert edit(client, "1", "the corrected wording", scope=None)["exit_code"] == 0
+
+    assert len(rows(settings)) == 1
+    body = client.get("/verify").json()
+    assert (body["unmatched_rows"], body["unlabelled"]) == (["#1"], ["#1"])
+
+
+def test_a_refused_edit_records_nothing(client: TestClient, settings: Settings):
+    note(client, "the first wording")
+
+    assert edit(client, "7", "no such rule")["exit_code"] == 1
+
+    assert len(rows(settings)) == 1
 
 
 def test_verify_ignores_rows_that_name_no_memory(

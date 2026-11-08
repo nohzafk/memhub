@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from . import rules
 from .rules import RulesError
-from .runner import REF_CREATING, BadRequest, RunResult, check, write_lock
+from .runner import SCOPE_RECORDING, BadRequest, RunResult, check, write_lock
 from .runner import run as run_tool
 from .scope import Scope, ScopeRecorder, ScopeStore
 from .settings import Settings
@@ -173,15 +173,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except BadRequest as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
-        # Scope is recorded only for the writes that create refs, inside the same
-        # lock, so a concurrent write cannot be credited to this caller.
+        # Scope is recorded only for the writes that create or edit a rule,
+        # inside the same lock, so a concurrent write cannot be credited to
+        # this caller.
         recorder = None
         scope = (
             Scope.parse(body.scope.model_dump(), s.host_projects)
             if body.scope
             else None
         )
-        if scope is not None and (body.tool, verb) in REF_CREATING:
+        if scope is not None and (body.tool, verb) in SCOPE_RECORDING:
             recorder = ScopeRecorder(ScopeStore(s.rules_dir), s.rules_dir, scope)
         # The commit's author is the writing machine's role and host.
         author = (

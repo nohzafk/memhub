@@ -32,8 +32,10 @@ MACHINES = ("work", "personal", "omarchy", "nuc", "cloud", "phone")
 APPLIES = ("portable", "host", "unknown")
 ASSERTED = ("declared", "inferred")
 
-# The line `note` and `merge` print for the id they created.
+# The line `note` and `merge` print for the id they created, and the line
+# `edit` prints for the id whose text it replaced.
 SAVED_RE = re.compile(r"^Saved as #(\d+)\.$", re.MULTILINE)
+EDITED_RE = re.compile(r"^Edited #(\d+)\.$", re.MULTILINE)
 
 META_NAME = "META.jsonl"
 EPOCH_NAME = "EPOCH"
@@ -135,9 +137,12 @@ class ScopeStore:
     is orphaned by them. It is not tracked by the store's git repository; the
     rules tool commits only RULES.txt and NEXT.
 
-    `edit` and `drop` write no row. A dropped rule's row becomes an unmatched
-    ref and an edited rule's row no longer matches its fingerprint; `/verify`
-    reports both, and neither is ever printed as an annotation.
+    `edit` appends a row for the id it kept, with the new text's fingerprint
+    and the editing request's scope; the last row of a ref wins, so it replaces
+    the old one. `drop` writes no row: a dropped rule's row becomes an
+    unmatched ref, which `/verify` reports and which is never printed as an
+    annotation. An `edit` that carried no scope writes no row either, and the
+    old row, whose fingerprint no longer matches, is reported the same way.
     """
 
     def __init__(self, store_dir: Path):
@@ -254,11 +259,13 @@ class ScopeStore:
 
 
 class ScopeRecorder:
-    """Records scope for the rule a write creates, inside the write's own lock.
+    """Records scope for the rule a write creates or edits, inside the write's
+    own lock.
 
-    The new id is read from the line `note` and `merge` print,
-    `Saved as #<id>.`, and the rule is then read back from the store, so the
-    row's fingerprint is of what was stored, not of what was sent.
+    The id is read from the line the tool printed — `Saved as #<id>.` from
+    `note` and `merge`, `Edited #<id>.` from `edit` — and the rule is then
+    read back from the store, so the row's fingerprint is of what was stored,
+    not of what was sent.
     """
 
     def __init__(self, store: ScopeStore, rules_dir: Path, scope: Scope):
@@ -269,7 +276,7 @@ class ScopeRecorder:
     def commit(self, stdout: str) -> int:
         from .rules import read_rules
 
-        m = SAVED_RE.search(stdout)
+        m = SAVED_RE.search(stdout) or EDITED_RE.search(stdout)
         if m is None:
             return 0
         rule_id = int(m.group(1))
