@@ -115,6 +115,85 @@ def test_text_check_rejects_and_writes_nothing(store: Path, text: str, needle: s
     assert (file_lines(store), next_id(store), log(store)) == before
 
 
+@pytest.mark.parametrize("sep", ["\u2028", "\u0085", "\u000c"])
+def test_a_line_separator_other_than_newline_is_refused(store: Path, sep: str):
+    """`str.splitlines` splits on these too: a stored one would cut the rule in
+    two on read and fail every later call."""
+    rules.note(store, "keep me")
+    rules.note(store, "and me")
+    before = (file_lines(store), next_id(store), log(store))
+    for call in (
+        lambda: rules.note(store, f"one{sep}two"),
+        lambda: rules.edit(store, 1, f"one{sep}two"),
+        lambda: rules.merge(store, [1, 2], f"one{sep}two"),
+    ):
+        with pytest.raises(RulesError) as e:
+            call()
+        assert (e.value.code, e.value.message) == (1, "the text must be one line")
+    assert (file_lines(store), next_id(store), log(store)) == before
+    assert rules.run(["wake"], store)[0] == 0
+
+
+@pytest.mark.parametrize("char", ["\x00", "\x1b", "\x7f", "\x9b"])
+def test_a_control_character_is_refused(store: Path, char: str):
+    with pytest.raises(RulesError) as e:
+        rules.note(store, f"a{char}b")
+    assert (e.value.code, e.value.message) == (1, "the text holds a control character")
+
+
+def test_a_tab_is_text(store: Path):
+    assert rules.note(store, "a\tb") == 1
+
+
+def test_a_hand_written_line_separator_stays_inside_its_rule(store: Path):
+    """RULES.txt is split on newline only."""
+    (store / "RULES.txt").write_text("#1 2026-01-02 one\u2028two\n", encoding="utf-8")
+    (store / "NEXT").write_text("2\n", encoding="utf-8")
+    assert rules.recall(store, "two") == "#1 2026-01-02 one\u2028two\n"
+    assert rules.rule_count(store) == 1
+
+
+def test_a_duplicated_id_fails_every_read_and_write(store: Path):
+    (store / "RULES.txt").write_text(
+        "#1 2026-01-02 a\n#2 2026-01-02 b\n#1 2026-01-02 c\n", encoding="utf-8"
+    )
+    (store / "NEXT").write_text("3\n", encoding="utf-8")
+    for argv in (["wake"], ["recall", "x"], ["note", "x"], ["edit", "2", "x"]):
+        code, _, err = rules.run(argv, store)
+        assert code == 3, argv
+        assert err == "RULES.txt holds #1 twice: lines 1 and 3\n"
+
+
+def test_a_failed_write_of_next_leaves_the_store_as_it_was(store: Path):
+    rules.note(store, "a")
+    before = ((store / "RULES.txt").read_bytes(), (store / "NEXT").read_bytes())
+    (store / "NEXT.tmp").mkdir()
+    with pytest.raises(OSError):
+        rules.note(store, "b")
+    assert ((store / "RULES.txt").read_bytes(), (store / "NEXT").read_bytes()) == before
+    assert git(store, "status", "--porcelain") == ""
+    assert log(store) == ["init", "note #1"]
+
+
+def test_a_failed_commit_leaves_the_tree_and_the_index_as_they_were(store: Path):
+    rules.note(store, "a")
+    before = ((store / "RULES.txt").read_bytes(), (store / "NEXT").read_bytes())
+    (store / ".git" / "HEAD.lock").write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="git commit failed"):
+        rules.note(store, "b")
+    (store / ".git" / "HEAD.lock").unlink()
+    assert ((store / "RULES.txt").read_bytes(), (store / "NEXT").read_bytes()) == before
+    assert git(store, "status", "--porcelain") == ""
+    assert log(store) == ["init", "note #1"]
+
+
+def test_an_edit_to_the_same_text_is_still_one_commit(store: Path):
+    rules.note(store, "same")
+    rules.edit(store, 1, "same")
+    assert log(store)[-1] == "edit #1"
+    assert file_lines(store) == ["#1 2026-01-02 same"]
+
+
 def test_text_of_exactly_280_bytes_is_accepted(store: Path):
     assert rules.note(store, "é" * 140) == 1
 

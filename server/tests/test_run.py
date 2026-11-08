@@ -61,6 +61,22 @@ def test_edit_drop_merge_round_trip(client: TestClient, settings: Settings):
     ]
 
 
+def test_an_edit_to_the_same_text_succeeds_and_records_scope(
+    client: TestClient, settings: Settings
+):
+    """Nothing changes in RULES.txt, but the write still commits and the scope
+    row is still re-recorded."""
+    scope = {"machine": "nuc", "host": "h1"}
+    run(client, "memo", "note", "unchanged", scope=scope)
+    r = run(client, "memo", "edit", "1", "unchanged", scope=scope)
+
+    assert r.status_code == 200
+    assert (r.json()["exit_code"], r.json()["stdout"]) == (0, "Edited #1.\n")
+    assert git_log(settings, "%s")[0] == "edit #1"
+    meta = (settings.rules_dir / "META.jsonl").read_text(encoding="utf-8")
+    assert len(meta.splitlines()) == 2
+
+
 def test_a_write_is_authored_by_the_scope_machine_and_host(
     client: TestClient, settings: Settings
 ):

@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,19 +106,41 @@ def _require_store(d: Path) -> None:
         )
 
 
+def _split(text: str) -> list[str]:
+    """Lines split on `\n` only. `str.splitlines` also splits on VT, FF, NEL,
+    U+2028 and U+2029, which would cut a rule in two on read."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _read_lines(d: Path) -> list[str]:
-    return (d / RULES).read_text(encoding="utf-8").splitlines()
+    return _split((d / RULES).read_text(encoding="utf-8"))
 
 
 def _rules_of(lines: list[str]) -> list[Rule]:
-    return [_parse(ln, i) for i, ln in enumerate(lines, 1) if _is_rule_line(ln)]
+    """The rules of `lines`; an id held twice fails like a malformed line."""
+    out: list[Rule] = []
+    seen: dict[int, int] = {}
+    for i, ln in enumerate(lines, 1):
+        if not _is_rule_line(ln):
+            continue
+        r = _parse(ln, i)
+        if r.id in seen:
+            raise RulesError(
+                EXIT_STORE, f"{RULES} holds #{r.id} twice: lines {seen[r.id]} and {i}"
+            )
+        seen[r.id] = i
+        out.append(r)
+    return out
 
 
 def rule_count(d: Path | str) -> int:
     """How many lines of RULES.txt are rules; 0 when there is no file. Parses
     nothing, so a malformed line still counts and /health cannot fail on it."""
     try:
-        lines = (Path(d) / RULES).read_text(encoding="utf-8").splitlines()
+        lines = _split((Path(d) / RULES).read_text(encoding="utf-8"))
     except OSError:
         return 0
     return sum(1 for ln in lines if _is_rule_line(ln))
@@ -145,8 +169,10 @@ def check_text(text: str) -> str:
     text = text.strip()
     if not text:
         raise RulesError(EXIT_USER, "the text is empty")
-    if "\n" in text or "\r" in text:
+    if len(text.splitlines()) != 1:
         raise RulesError(EXIT_USER, "the text must be one line")
+    if any(c != "\t" and unicodedata.category(c) == "Cc" for c in text):
+        raise RulesError(EXIT_USER, "the text holds a control character")
     n = len(text.encode("utf-8"))
     if n > MAX_TEXT_BYTES:
         raise RulesError(
@@ -218,9 +244,12 @@ def _git(d: Path, *args: str, author: str | None = None) -> None:
         raise RuntimeError(f"git {args[0]} failed: {p.stderr.strip()}")
 
 
-def _commit(d: Path, message: str, author: str | None = None) -> None:
+def _commit(
+    d: Path, message: str, author: str | None = None, allow_empty: bool = False
+) -> None:
     _git(d, "add", "--", RULES, NEXT, author=author)
-    _git(d, "commit", "-q", "--no-verify", "-m", message, author=author)
+    empty = ("--allow-empty",) if allow_empty else ()
+    _git(d, "commit", "-q", "--no-verify", *empty, "-m", message, author=author)
 
 
 @contextmanager
@@ -239,19 +268,43 @@ def _write_atomic(path: Path, data: str) -> None:
     os.replace(tmp, path)
 
 
-def _store(
-    d: Path, lines: list[str], next_id: int, message: str, author: str | None = None
-) -> None:
-    """Write RULES.txt and NEXT and commit them; undo the files if the commit fails."""
-    old_rules = (d / RULES).read_text(encoding="utf-8")
-    old_next = (d / NEXT).read_text(encoding="utf-8")
-    _write_atomic(d / RULES, "".join(ln + "\n" for ln in lines))
-    _write_atomic(d / NEXT, f"{next_id}\n")
+def _restore(path: Path, data: bytes) -> None:
+    """Put `data` back at `path` by rename, through a fresh temporary name: the
+    failure being undone may be the one that broke `<path>.tmp`."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        _commit(d, message, author)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
     except BaseException:
-        _write_atomic(d / RULES, old_rules)
-        _write_atomic(d / NEXT, old_next)
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _store(
+    d: Path,
+    lines: list[str],
+    next_id: int,
+    message: str,
+    author: str | None = None,
+    allow_empty: bool = False,
+) -> None:
+    """Write RULES.txt and NEXT and commit them, all or nothing.
+
+    On any failure, from either replacement to the commit, both files get their
+    previous bytes back and the index is reset to HEAD for them, so the working
+    tree and the index are as they were.
+    """
+    old_rules = (d / RULES).read_bytes()
+    old_next = (d / NEXT).read_bytes()
+    try:
+        _write_atomic(d / RULES, "".join(ln + "\n" for ln in lines))
+        _write_atomic(d / NEXT, f"{next_id}\n")
+        _commit(d, message, author, allow_empty)
+    except BaseException:
+        _restore(d / RULES, old_rules)
+        _restore(d / NEXT, old_next)
+        _git(d, "reset", "-q", "--", RULES, NEXT)
         raise
 
 
@@ -344,7 +397,11 @@ def edit(d: Path | str, rule_id: int, text: str, author: str | None = None) -> N
         i = _index_of(lines, rule_id)
         old = _parse(lines[i], i + 1)
         lines[i] = Rule(old.id, old.date, text).line
-        _store(d, lines, _read_next(d, rules), f"edit #{rule_id}", author)
+        # An unchanged text still commits: one commit per write, and the
+        # server re-records the scope row of the id either way.
+        _store(
+            d, lines, _read_next(d, rules), f"edit #{rule_id}", author, allow_empty=True
+        )
 
 
 def drop(
