@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # sops-nix renders the shared token here on both workstations.
-TOKEN_FILE="${MEMHUB_TOKEN_FILE:-/run/secrets/memhub-token}"
+TOKEN_FILE="${MEMHUB_TOKEN_FILE:-/run/secrets/memhub_token}"
 SKIP_CHECKS="no"
 
 main() {
