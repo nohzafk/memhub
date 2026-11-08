@@ -1,18 +1,18 @@
-"""Fixtures: a real store in a tmp dir.
+"""Fixtures: a real rules store in a tmp dir.
 
-The tests drive the vendored `memo.py` for real — it is the
-whole point of the passthrough design, and mocking them would test nothing.
+The tests drive the rules store for real, git included — it is the whole point
+of the passthrough design, and mocking it would test nothing. `vendor_dir` is
+OptMem's vendored `memo.py`, which only the migration tools' tests still use.
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from memhub import rules
 from memhub.app import create_app
 from memhub.settings import Settings
 
@@ -25,8 +25,10 @@ def vendor_dir() -> Path:
 
 
 @pytest.fixture
-def settings(tmp_path: Path, vendor_dir: Path) -> Settings:
-    """A provisioned store: `memo init` has run, the token file exists."""
+def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """A provisioned store: `rules.py init` has run, the token file exists."""
+    # The commit author must come from the request, not from this shell.
+    monkeypatch.delenv("MEMHUB_AUTHOR", raising=False)
     data = tmp_path / "data"
     data.mkdir()
     token_file = tmp_path / "token"
@@ -34,16 +36,10 @@ def settings(tmp_path: Path, vendor_dir: Path) -> Settings:
     s = Settings(
         data_dir=data,
         token_file=token_file,
-        vendor_dir=vendor_dir,
         # One machine-bound project, so applicability derivation has something to derive.
         host_projects=("machine-config",),
     )
-    subprocess.run(
-        [sys.executable, str(s.memo_py), "init"],
-        env={"MEMORY_DIR": str(s.optmem_dir), "PATH": "/usr/bin:/bin"},
-        check=True,
-        capture_output=True,
-    )
+    rules.init(s.rules_dir)
     return s
 
 

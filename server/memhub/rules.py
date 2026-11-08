@@ -109,6 +109,16 @@ def _rules_of(lines: list[str]) -> list[Rule]:
     return [_parse(ln, i) for i, ln in enumerate(lines, 1) if _is_rule_line(ln)]
 
 
+def rule_count(d: Path | str) -> int:
+    """How many lines of RULES.txt are rules; 0 when there is no file. Parses
+    nothing, so a malformed line still counts and /health cannot fail on it."""
+    try:
+        lines = (Path(d) / RULES).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    return sum(1 for ln in lines if _is_rule_line(ln))
+
+
 def read_rules(d: Path | str) -> list[Rule]:
     """The rules in force, in id order."""
     d = Path(d)
@@ -173,9 +183,14 @@ def today() -> str:
 # ---- git and the lock --------------------------------------------------------
 
 
-def _author() -> tuple[str, str]:
-    """``MEMHUB_AUTHOR="role host"`` -> ("role host", "role@host")."""
-    raw = os.environ.get("MEMHUB_AUTHOR", "").strip()
+def _author(author: str | None = None) -> tuple[str, str]:
+    """``"role host"`` -> ("role host", "role@host").
+
+    ``author`` is the caller's; without one, ``$MEMHUB_AUTHOR`` is read. The
+    server passes it, because a threaded server cannot set the environment per
+    request.
+    """
+    raw = (os.environ.get("MEMHUB_AUTHOR", "") if author is None else author).strip()
     parts = raw.split()
     if len(parts) == 2:
         return raw, f"{parts[0]}@{parts[1]}"
@@ -184,8 +199,8 @@ def _author() -> tuple[str, str]:
     return "memhub", "memhub@localhost"
 
 
-def _git(d: Path, *args: str) -> None:
-    name, email = _author()
+def _git(d: Path, *args: str, author: str | None = None) -> None:
+    name, email = _author(author)
     env = dict(os.environ)
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
@@ -200,9 +215,9 @@ def _git(d: Path, *args: str) -> None:
         raise RuntimeError(f"git {args[0]} failed: {p.stderr.strip()}")
 
 
-def _commit(d: Path, message: str) -> None:
-    _git(d, "add", "--", RULES, NEXT)
-    _git(d, "commit", "-q", "--no-verify", "-m", message)
+def _commit(d: Path, message: str, author: str | None = None) -> None:
+    _git(d, "add", "--", RULES, NEXT, author=author)
+    _git(d, "commit", "-q", "--no-verify", "-m", message, author=author)
 
 
 @contextmanager
@@ -221,14 +236,16 @@ def _write_atomic(path: Path, data: str) -> None:
     os.replace(tmp, path)
 
 
-def _store(d: Path, lines: list[str], next_id: int, message: str) -> None:
+def _store(
+    d: Path, lines: list[str], next_id: int, message: str, author: str | None = None
+) -> None:
     """Write RULES.txt and NEXT and commit them; undo the files if the commit fails."""
     old_rules = (d / RULES).read_text(encoding="utf-8")
     old_next = (d / NEXT).read_text(encoding="utf-8")
     _write_atomic(d / RULES, "".join(ln + "\n" for ln in lines))
     _write_atomic(d / NEXT, f"{next_id}\n")
     try:
-        _commit(d, message)
+        _commit(d, message, author)
     except BaseException:
         _write_atomic(d / RULES, old_rules)
         _write_atomic(d / NEXT, old_next)
@@ -297,7 +314,7 @@ def recall(d: Path | str, pattern: str) -> str:
     return "".join(r.line + "\n" for r in read_rules(d) if rx.search(r.text))
 
 
-def note(d: Path | str, text: str) -> int:
+def note(d: Path | str, text: str, author: str | None = None) -> int:
     """Append a rule with the next id and today's date; returns the id."""
     d = Path(d)
     text = check_text(text)
@@ -307,11 +324,11 @@ def note(d: Path | str, text: str) -> int:
         lines = _read_lines(d)
         new_id = _read_next(d, _rules_of(lines))
         lines.append(Rule(new_id, date, text).line)
-        _store(d, lines, new_id + 1, f"note #{new_id}")
+        _store(d, lines, new_id + 1, f"note #{new_id}", author)
     return new_id
 
 
-def edit(d: Path | str, rule_id: int, text: str) -> None:
+def edit(d: Path | str, rule_id: int, text: str, author: str | None = None) -> None:
     """Replace a rule's text in place; id and date stay."""
     d = Path(d)
     text = check_text(text)
@@ -322,10 +339,12 @@ def edit(d: Path | str, rule_id: int, text: str) -> None:
         i = _index_of(lines, rule_id)
         old = _parse(lines[i], i + 1)
         lines[i] = Rule(old.id, old.date, text).line
-        _store(d, lines, _read_next(d, rules), f"edit #{rule_id}")
+        _store(d, lines, _read_next(d, rules), f"edit #{rule_id}", author)
 
 
-def drop(d: Path | str, rule_id: int, why: str | None = None) -> None:
+def drop(
+    d: Path | str, rule_id: int, why: str | None = None, author: str | None = None
+) -> None:
     """Remove a rule; ``why`` goes into the commit message only."""
     d = Path(d)
     why = (why or "").strip()
@@ -337,10 +356,10 @@ def drop(d: Path | str, rule_id: int, why: str | None = None) -> None:
         rules = _rules_of(lines)
         del lines[_index_of(lines, rule_id)]
         message = f"drop #{rule_id}: {why}" if why else f"drop #{rule_id}"
-        _store(d, lines, _read_next(d, rules), message)
+        _store(d, lines, _read_next(d, rules), message, author)
 
 
-def merge(d: Path | str, ids: list[int], text: str) -> int:
+def merge(d: Path | str, ids: list[int], text: str, author: str | None = None) -> int:
     """Remove the listed rules and append one with a new id, in one commit."""
     d = Path(d)
     text = check_text(text)
@@ -356,7 +375,7 @@ def merge(d: Path | str, ids: list[int], text: str) -> int:
         lines = [ln for ln in lines if ln not in gone]
         lines.append(Rule(new_id, date, text).line)
         src = ",".join(f"#{i}" for i in ids)
-        _store(d, lines, new_id + 1, f"merge {src} -> #{new_id}")
+        _store(d, lines, new_id + 1, f"merge {src} -> #{new_id}", author)
     return new_id
 
 
@@ -368,8 +387,13 @@ def _arity(args: list[str], lo: int, hi: int, verb: str) -> None:
         raise RulesError(EXIT_USER, f"wrong number of arguments for {verb}\n{USAGE}")
 
 
-def run(argv: list[str], d: Path | str) -> tuple[int, str, str]:
-    """Run one call; returns (exit code, stdout, stderr). Never raises RulesError."""
+def run(
+    argv: list[str], d: Path | str, author: str | None = None
+) -> tuple[int, str, str]:
+    """Run one call; returns (exit code, stdout, stderr). Never raises RulesError.
+
+    ``author`` names the commit's author for a write (see ``_author``).
+    """
     try:
         if not argv:
             raise RulesError(EXIT_USER, USAGE)
@@ -387,22 +411,22 @@ def run(argv: list[str], d: Path | str) -> tuple[int, str, str]:
                 return EXIT_OK, recall(d, args[0]), ""
             case "note":
                 _arity(args, 1, 1, verb)
-                return EXIT_OK, f"Saved as #{note(d, args[0])}.\n", ""
+                return EXIT_OK, f"Saved as #{note(d, args[0], author)}.\n", ""
             case "edit":
                 _arity(args, 2, 2, verb)
                 rule_id = parse_id(args[0])
-                edit(d, rule_id, args[1])
+                edit(d, rule_id, args[1], author)
                 return EXIT_OK, f"Edited #{rule_id}.\n", ""
             case "drop":
                 _arity(args, 1, 2, verb)
                 rule_id = parse_id(args[0])
-                drop(d, rule_id, args[1] if len(args) > 1 else None)
+                drop(d, rule_id, args[1] if len(args) > 1 else None, author)
                 return EXIT_OK, f"Dropped #{rule_id}.\n", ""
             case "merge":
                 _arity(args, 2, 2, verb)
                 return (
                     EXIT_OK,
-                    f"Saved as #{merge(d, parse_ids(args[0]), args[1])}.\n",
+                    f"Saved as #{merge(d, parse_ids(args[0]), args[1], author)}.\n",
                     "",
                 )
             case _:

@@ -1,28 +1,26 @@
-"""`POST /run` — command passthrough to the vendored tools.
+"""`POST /run` — command passthrough to the rules store.
 
-The transport is argv, not a per-verb REST API: the server executes
-`memo.py` against the server-side store, so wake pagination,
-nap prompts, flock, import validation and crash repair all come from the tool
-itself and cannot drift from it.
+The transport is argv, not a per-verb REST API: the server hands argv to the
+rules store's own parser (`rules.run`), in process, so the text check, the id
+assignment, the flock and the commit all come from the tool itself and cannot
+drift from it.
 
-Nothing here goes through a shell. argv is handed to the tool's own parser as a
-list, so a quote or a semicolon in a memory is text and never syntax.
+Nothing here goes through a shell. argv is handed to the tool's parser as a
+list, so a quote or a semicolon in a rule is text and never syntax.
 """
 
 from __future__ import annotations
 
 import fcntl
-import os
-import subprocess
-import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import rules
 from .settings import Settings
 
-MEMO_VERBS = {"wake", "note", "nap", "recall", "zoom", "forget", "config", "import"}
+MEMO_VERBS = {"wake", "recall", "note", "edit", "drop", "merge"}
 # `memo init` is deliberately absent: the store is created once, at
 # provisioning. Serving it would let a typo create a second identity.
 
@@ -31,17 +29,14 @@ VERBS = {"memo": MEMO_VERBS}
 # Verbs that change a store, and so take the write lock.
 WRITE_VERBS = {
     ("memo", "note"),
-    ("memo", "nap"),
-    ("memo", "import"),
-    ("memo", "forget"),
-    ("memo", "config"),
+    ("memo", "edit"),
+    ("memo", "drop"),
+    ("memo", "merge"),
 }
 
-# Verbs that create a new ref, and so a new scope row. `nap` writes summaries
-# into TREE/, which is derived from LOG.txt and is not a memory of its own.
-REF_CREATING = {("memo", "note"), ("memo", "import")}
-
-TIMEOUT = 60.0
+# Verbs that create a new id, and so a new scope row. `edit` and `drop` keep
+# or retire an id; they create none.
+REF_CREATING = {("memo", "note"), ("memo", "merge")}
 
 _thread_lock = threading.Lock()
 
@@ -79,9 +74,9 @@ def _listed(tool: str) -> str:
 def write_lock(path: Path):
     """One writer at a time, across threads and across processes.
 
-    `memo.py` flocks its own store already. This lock brackets the scope
-    recorder's snapshot and commit around the write, and `/export` takes it so
-    a note landing mid-read cannot produce a torn `LOG.txt`.
+    The rules store flocks its own `.lock` already. This lock brackets the
+    scope recorder's commit around the write, and `/export` takes it so a
+    write landing mid-read cannot produce a torn copy of the repository.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with _thread_lock, path.open("a") as fh:
@@ -92,42 +87,34 @@ def write_lock(path: Path):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def run(settings: Settings, tool: str, argv: list[str], recorder=None) -> RunResult:
-    """Execute one allowlisted command against the server-side stores.
+def run(
+    settings: Settings,
+    tool: str,
+    argv: list[str],
+    recorder=None,
+    author: str | None = None,
+) -> RunResult:
+    """Execute one allowlisted command against the server-side store.
 
-    `recorder`, when given, has `snapshot()` and `commit(snapshot)`. Both run
-    inside the write lock, so what this write created cannot be confused with
-    what a concurrent write created.
+    `recorder`, when given, has `commit(stdout)`. It runs inside the write
+    lock, so what this write created cannot be confused with what a concurrent
+    write created. `author` becomes the commit's author (`"<role> <host>"`);
+    without one the store's default applies.
+
+    The call is in process, so there is no timeout: nothing here waits on
+    anything but the local filesystem and `git`.
     """
     verb = check(tool, argv)
-    env_extra = {"MEMORY_DIR": str(settings.optmem_dir)}
-    cmd = [sys.executable, str(settings.memo_py), *argv]
-
     if (tool, verb) in WRITE_VERBS:
         with write_lock(settings.lock_path):
-            before = recorder.snapshot() if recorder is not None else None
-            result = _exec(cmd, env_extra, tool, verb)
+            result = _exec(argv, settings, author)
             if recorder is not None and result.exit_code == 0:
-                recorder.commit(before)
+                recorder.commit(result.stdout)
             return result
-    return _exec(cmd, env_extra, tool, verb)
+    return _exec(argv, settings, author)
 
 
-def _exec(cmd: list[str], env_extra: dict[str, str], tool: str, verb: str) -> RunResult:
-    env = dict(os.environ)
-    env.update(env_extra)
-    try:
-        p = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            timeout=TIMEOUT,
-            env=env,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        return RunResult(
-            124, "", f"memhub: {tool} {verb} timed out after {TIMEOUT:.0f}s"
-        )
-    return RunResult(p.returncode, p.stdout, p.stderr)
+def _exec(argv: list[str], settings: Settings, author: str | None) -> RunResult:
+    # `author=""` would read as a named author; None falls back to the default.
+    code, out, err = rules.run(argv, settings.rules_dir, author or None)
+    return RunResult(code, out, err)

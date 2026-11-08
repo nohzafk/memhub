@@ -1,26 +1,27 @@
-"""Scope metadata: who wrote a memory, and where it is true.
+"""Scope metadata: who wrote a rule, and where it is true.
 
-Held in `optmem/META.jsonl`, one JSON object per memory, never in the memory's
-own text — a text tag is paid twice, cannot be elided when it already matches the
-reader, and cannot survive `nap`, because a summary of 16 memories from 3
-machines must itself fit the same 280 bytes.
+Held in `rules/META.jsonl`, one JSON object per rule, never in the rule's own
+text — a text tag is paid twice, cannot be elided when it already matches the
+reader, and costs bytes of the 280 a rule may hold.
 
 Two facts of different kinds live here. **Provenance** — machine, host, project,
 actor — is objective and derived for free by the client. **Applicability** —
 whether a fact is true anywhere or only on the machine that wrote it — is a
 judgement. They come apart constantly, so they are separate fields.
 
-Refs are byte offsets, so a wiped and re-imported store shifts every id and would
-leave this file describing the wrong memories. Two defences make that detectable
-rather than silent: every row carries a fingerprint of the memory it describes,
-and every row carries the store's epoch. A mismatch on either **suppresses the
-annotation**; it never prints a guess.
+A ref is one rule id, `#<N>`. Ids are never reused within a store, but a store
+that is re-created starts again at #1, and `memo edit` changes a rule's text
+under its id. Two defences make either detectable rather than silent: every row
+carries a fingerprint of the rule it describes, and every row carries the
+store's epoch. A mismatch on either **suppresses the annotation**; it never
+prints a guess.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -30,6 +31,9 @@ from pathlib import Path
 MACHINES = ("work", "personal", "omarchy", "nuc", "cloud", "phone")
 APPLIES = ("portable", "host", "unknown")
 ASSERTED = ("declared", "inferred")
+
+# The line `note` and `merge` print for the id they created.
+SAVED_RE = re.compile(r"^Saved as #(\d+)\.$", re.MULTILINE)
 
 META_NAME = "META.jsonl"
 EPOCH_NAME = "EPOCH"
@@ -124,17 +128,22 @@ def fingerprint(date: str, text: str) -> str:
 
 
 class ScopeStore:
-    """`optmem/META.jsonl` plus the store's epoch.
+    """`rules/META.jsonl` plus the store's epoch.
 
-    Append-only, like the log it describes. It lives inside the store directory
-    on purpose: seeding and restoring both re-import whole store directories, so
-    metadata kept anywhere else is orphaned by the plan's own rollback steps.
+    Append-only. It lives inside the store directory on purpose: `/export` and
+    a restore both copy whole store directories, so metadata kept anywhere else
+    is orphaned by them. It is not tracked by the store's git repository; the
+    rules tool commits only RULES.txt and NEXT.
+
+    `edit` and `drop` write no row. A dropped rule's row becomes an unmatched
+    ref and an edited rule's row no longer matches its fingerprint; `/verify`
+    reports both, and neither is ever printed as an annotation.
     """
 
-    def __init__(self, optmem_dir: Path):
-        self.dir = optmem_dir
-        self.path = optmem_dir / META_NAME
-        self.epoch_path = optmem_dir / EPOCH_NAME
+    def __init__(self, store_dir: Path):
+        self.dir = store_dir
+        self.path = store_dir / META_NAME
+        self.epoch_path = store_dir / EPOCH_NAME
 
     def epoch(self) -> str:
         """The store's identity. Minted on first use and destroyed with the
@@ -229,8 +238,8 @@ class ScopeStore:
         that have no row."""
         rows, epoch = self.rows(), self.epoch()
         matched = self.lookup(known)
-        # Only `#N` refs name memories. Rows with any other ref describe entries
-        # outside OptMem and are neither stale nor auditable here.
+        # Only `#N` refs name rules. Rows with any other ref describe entries
+        # outside the store and are neither stale nor auditable here.
         stale = [
             ref
             for ref, row in rows.items()
@@ -245,30 +254,26 @@ class ScopeStore:
 
 
 class ScopeRecorder:
-    """Records scope for whatever a write creates, inside the write's own lock.
+    """Records scope for the rule a write creates, inside the write's own lock.
 
-    New refs are found by comparing the store before and after — never by
-    parsing ids out of the tool's prose, which would make the record depend on
-    wording that belongs to `memo.py`.
+    The new id is read from the line `note` and `merge` print,
+    `Saved as #<id>.`, and the rule is then read back from the store, so the
+    row's fingerprint is of what was stored, not of what was sent.
     """
 
-    def __init__(
-        self,
-        store: ScopeStore,
-        optmem_dir: Path,
-        scope: Scope,
-    ):
+    def __init__(self, store: ScopeStore, rules_dir: Path, scope: Scope):
         self.store = store
-        self.optmem_dir = optmem_dir
+        self.rules_dir = rules_dir
         self.scope = scope
 
-    def snapshot(self) -> int:
-        from .store import memo_count
+    def commit(self, stdout: str) -> int:
+        from .rules import read_rules
 
-        return memo_count(self.optmem_dir)
-
-    def commit(self, snapshot: int) -> int:
-        from .store import read_memos
-
-        new = read_memos(self.optmem_dir, snapshot)
-        return self.store.record([(d.ref, d.date, d.text, self.scope) for d in new])
+        m = SAVED_RE.search(stdout)
+        if m is None:
+            return 0
+        rule_id = int(m.group(1))
+        new = [r for r in read_rules(self.rules_dir) if r.id == rule_id]
+        return self.store.record(
+            [(f"#{r.id}", r.date, r.text, self.scope) for r in new]
+        )

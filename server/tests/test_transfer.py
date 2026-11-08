@@ -1,17 +1,15 @@
-"""`/export` and `/import` — the mirror and the way back.
+"""`/export`, the mirror's copy of the store, and the retired `/import`.
 
-These two carry the whole-copy discipline. A mirror is safe *because* it is a
-byte copy that nothing writes to: ids, `TREE/` and `META.jsonl` all stay valid,
-so it can be promoted to be the store. `/import` is the only way memories written
-to a second store can rejoin the first, and it works only because `memo import`
-appends in date order — which is why the local tail, being newest, fits.
+A mirror is safe *because* it is a byte copy that nothing writes to: ids,
+history and `META.jsonl` all stay valid, so it can be promoted to be the store.
 """
 
 from __future__ import annotations
 
 import io
-import json
+import subprocess
 import tarfile
+from pathlib import Path
 
 from conftest import TOKEN
 from fastapi.testclient import TestClient
@@ -33,33 +31,51 @@ def members(body: bytes) -> dict[str, bytes]:
 
 def test_export_is_a_byte_copy_of_the_store(client: TestClient, settings: Settings):
     """The promise a mirror rests on: what comes out is what is on disk, so a
-    promoted mirror keeps every id and every summary."""
+    promoted mirror keeps every id, its history and its scope."""
     client.post(
         "/run", json={"tool": "memo", "argv": ["note", "a fact"], "scope": OMARCHY}
     )
 
-    body = client.get("/export").content
+    files = members(client.get("/export").content)
 
-    files = members(body)
-    assert files["optmem/LOG.txt"] == (settings.optmem_dir / "LOG.txt").read_bytes()
-    assert (
-        files["optmem/META.jsonl"] == (settings.optmem_dir / "META.jsonl").read_bytes()
-    )
-    assert "optmem/config" in files
-    assert not any(name.startswith("daily/") for name in files)
+    d = settings.rules_dir
+    for name in ("RULES.txt", "NEXT", "META.jsonl", "EPOCH"):
+        assert files[f"rules/{name}"] == (d / name).read_bytes(), name
+    assert "rules/.git/HEAD" in files
+    assert not any(name.startswith(("daily/", "optmem/")) for name in files)
+
+
+def test_export_carries_the_history(
+    client: TestClient, settings: Settings, tmp_path: Path
+):
+    client.post("/run", json={"tool": "memo", "argv": ["note", "a fact"]})
+    with tarfile.open(fileobj=io.BytesIO(client.get("/export").content)) as tar:
+        tar.extractall(tmp_path / "mirror", filter="data")
+
+    log = subprocess.run(
+        ["git", "-C", str(tmp_path / "mirror" / "rules"), "log", "--format=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert log.splitlines() == ["note #1", "init"]
 
 
 def test_export_leaves_the_lock_file_out(client: TestClient, settings: Settings):
-    """It is a lock, not data, and `memo` recreates it."""
+    """It is a lock, not data, and the tool recreates it."""
     client.post("/run", json={"tool": "memo", "argv": ["note", "a fact"]})
-    assert (settings.optmem_dir / ".lock").exists()
+    assert (settings.rules_dir / ".lock").exists()
 
-    assert not any(".lock" in name for name in members(client.get("/export").content))
+    assert not any(
+        name.endswith(".lock") for name in members(client.get("/export").content)
+    )
 
 
 def test_export_of_a_fresh_store_still_unpacks(client: TestClient):
     files = members(client.get("/export").content)
-    assert files["optmem/LOG.txt"] == b""
+    assert files["rules/RULES.txt"] == b""
+    assert files["rules/NEXT"] == b"1\n"
 
 
 def test_export_needs_the_token(anon: TestClient):
@@ -73,63 +89,8 @@ def test_export_needs_the_token(anon: TestClient):
 # ------------------------------------------------------------------ import
 
 
-def test_import_appends_and_records_scope(client: TestClient, settings: Settings):
-    body = client.post(
-        "/import",
-        json={
-            "text": "2026-08-01 promoted one\n2026-08-02 promoted two\n",
-            "scope": OMARCHY,
-        },
-    ).json()
-
-    assert body["exit_code"] == 0
-    assert "Imported 2 memories, #0 to #1." in body["stdout"]
-    rows = [
-        json.loads(line)
-        for line in (settings.optmem_dir / "META.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
-    assert [(r["ref"], r["machine"], r["applies"]) for r in rows] == [
-        ("#0", "omarchy", "unknown"),
-        ("#1", "omarchy", "unknown"),
-    ]
-
-
-def test_import_without_scope_still_appends(client: TestClient, settings: Settings):
-    body = client.post("/import", json={"text": "2026-08-01 unlabelled\n"}).json()
-
-    assert body["exit_code"] == 0
-    assert not (settings.optmem_dir / "META.jsonl").exists()
-
-
-def test_an_out_of_order_date_is_refused_and_writes_nothing(
-    client: TestClient, settings: Settings
-):
-    """`memo import` refuses a line older than the store's newest memory. That is
-    the rule the whole write-back path depends on, so the failure has to be clean
-    and the tool's own message has to reach the caller."""
-    client.post("/run", json={"tool": "memo", "argv": ["note", "today's memory"]})
-    before = (settings.optmem_dir / "LOG.txt").read_bytes()
-
-    body = client.post("/import", json={"text": "2020-01-01 far too old\n"}).json()
-
-    assert body["exit_code"] == 1
-    assert "precedes the previous memory" in body["stderr"]
-    assert (settings.optmem_dir / "LOG.txt").read_bytes() == before
-
-
-def test_an_empty_dump_is_a_400(client: TestClient):
-    assert client.post("/import", json={"text": "   \n"}).status_code == 400
-
-
-def test_the_staged_file_never_survives(client: TestClient, settings: Settings):
-    """It is written into the data dir because the unit's PrivateTmp hides /tmp
-    from the service. It must not accumulate there."""
-    client.post("/import", json={"text": "2026-08-01 one\n"})
-    client.post("/import", json={"text": "2020-01-01 refused\n"})
-
-    assert list(settings.data_dir.glob(".import-*")) == []
-
-
-def test_import_needs_the_token(anon: TestClient):
-    assert anon.post("/import", json={"text": "2026-08-01 x\n"}).status_code == 401
+def test_import_is_gone(client: TestClient):
+    """Its format was OptMem's. A local rule reaches the shared store as a
+    `note` over `/run`."""
+    r = client.post("/import", json={"text": "2026-08-01 x\n"})
+    assert r.status_code == 404

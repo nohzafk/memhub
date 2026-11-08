@@ -14,9 +14,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_store import write_log
 
-from memhub.store import LOG_REC
+from memhub.scope import ScopeStore
+
+# An OptMem LOG.txt: memory #i is the fixed 320-byte record at offset i*320,
+# "#<id> <YYYY-MM-DD> <text>" right-padded with spaces, sliced as bytes.
+LOG_REC = 320
 
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 DUMP = TOOLS / "dump_log.py"
@@ -40,6 +43,29 @@ def memo(vendor_dir: Path, store: Path, *argv: str) -> subprocess.CompletedProce
         text=True,
         check=False,
     )
+
+
+def write_log(path: Path, entries: list[tuple[str, str]]) -> None:
+    """Write LOG.txt the way memo.py does: fixed-width records, padded in
+    BYTES, so a multi-byte character shortens the visible text, not the
+    record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        for i, (date, text) in enumerate(entries):
+            rec = f"#{i} {date} {text}".encode()
+            f.write(rec + b" " * (LOG_REC - 1 - len(rec)) + b"\n")
+
+
+def known_memos(store: Path) -> dict[str, tuple[str, str]]:
+    """Every complete record of an OptMem store as {ref: (date, text)}."""
+    buf = (store / "LOG.txt").read_bytes()
+    out = {}
+    for k in range(len(buf) // LOG_REC):
+        rec = buf[k * LOG_REC : (k + 1) * LOG_REC].decode("utf-8").rstrip()
+        ref, _, rest = rec.partition(" ")
+        date, _, text = rest.partition(" ")
+        out[ref] = (date, text)
+    return out
 
 
 # ------------------------------------------------------------------ dump_log
@@ -349,10 +375,7 @@ def test_the_whole_m6_seed_carries_its_scope(tmp_path: Path, vendor_dir: Path):
         meta.read_text(encoding="utf-8"), encoding="utf-8"
     )
 
-    from memhub.scope import ScopeStore
-    from memhub.store import read_memos
-
-    known = {d.ref: (d.date, d.text) for d in read_memos(store)}
+    known = known_memos(store)
     found = ScopeStore(store).lookup(known)
 
     assert len(found) == 3
@@ -384,10 +407,7 @@ def test_a_misaligned_seed_is_detected_not_believed(tmp_path: Path, vendor_dir: 
         meta.read_text(encoding="utf-8"), encoding="utf-8"
     )
 
-    from memhub.scope import ScopeStore
-    from memhub.store import read_memos
-
-    known = {d.ref: (d.date, d.text) for d in read_memos(store)}
+    known = known_memos(store)
 
     # #0 is the pre-existing note, so the row claiming #0 does not match it and
     # is dropped rather than mislabelling someone else's memory.

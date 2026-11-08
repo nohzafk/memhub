@@ -19,7 +19,6 @@ DEFAULT_TOKEN_FILE = "/etc/memhub/token"
 class Settings:
     data_dir: Path
     token_file: Path
-    vendor_dir: Path
     # Projects whose memories are machine-bound by default — a config repo for
     # one box. Whether a project is machine-bound is a property of the project,
     # identical on every machine, so it is held here once rather than in each
@@ -32,10 +31,6 @@ class Settings:
         return cls(
             data_dir=Path(env.get("MEMHUB_DATA") or DEFAULT_DATA),
             token_file=Path(env.get("MEMHUB_TOKEN_FILE") or DEFAULT_TOKEN_FILE),
-            vendor_dir=Path(
-                env.get("MEMHUB_VENDOR")
-                or Path(__file__).resolve().parent.parent / "vendor"
-            ),
             host_projects=tuple(
                 part.strip()
                 for part in (env.get("MEMHUB_HOST_PROJECTS") or "").split(":")
@@ -44,13 +39,9 @@ class Settings:
         )
 
     @property
-    def optmem_dir(self) -> Path:
-        return self.data_dir / "optmem"
+    def rules_dir(self) -> Path:
+        return self.data_dir / "rules"
 
     @property
     def lock_path(self) -> Path:
         return self.data_dir / ".write.lock"
-
-    @property
-    def memo_py(self) -> Path:
-        return self.vendor_dir / "memo.py"

@@ -1,39 +1,40 @@
 """The HTTP surface.
 
-Five endpoints. `/health` is unauthenticated so a probe can reach it; the others
-need `Authorization: Bearer <token>`.
+Four endpoints: `/health`, `/run`, `/export` and `/verify`. `/health` is
+unauthenticated so a probe can reach it; the others need
+`Authorization: Bearer <token>`.
 
-The endpoints are sync (`def`, not `async def`) on purpose: each one blocks on a
-a subprocess or the filesystem, so FastAPI runs them in its threadpool instead
-of stalling the event loop.
+The endpoints are sync (`def`, not `async def`) on purpose: each one blocks on
+the filesystem or a `git` subprocess, so FastAPI runs them in its threadpool
+instead of stalling the event loop.
 """
 
 from __future__ import annotations
 
 import io
 import logging
-import os
 import re
 import secrets
 import tarfile
-import threading
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from . import rules
+from .rules import RulesError
 from .runner import REF_CREATING, BadRequest, RunResult, check, write_lock
 from .runner import run as run_tool
 from .scope import Scope, ScopeRecorder, ScopeStore
 from .settings import Settings
-from .store import memo_count, read_memos
 
 log = logging.getLogger("memhub")
 
-# A memory as `memo` prints it, at the start of a line. Matching is read-only:
+# A rule as `memo` prints it, at the start of a line. Matching is read-only:
 # stdout is never rewritten — the client appends a footer — so a pattern that
-# finds nothing costs a missing annotation and never a mangled memory.
+# finds nothing costs a missing annotation and never a mangled rule. A wake's
+# `## <tag>` group lines do not match.
 REF_RE = re.compile(r"^#(\d+) ", re.MULTILINE)
 
 
@@ -69,27 +70,9 @@ class RunResponse(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
-    # Scope for the memories named in `stdout`, for the client's footer. Only
-    # rows whose fingerprint and epoch still match the memory appear here.
+    # Scope for the rules named in `stdout`, for the client's footer. Only
+    # rows whose fingerprint and epoch still match the rule appear here.
     scopes: list[ScopeHit] | None = None
-
-
-class ImportRequest(BaseModel):
-    """A dump in `memo import` format: `YYYY-MM-DD <text>` per line.
-
-    The text travels in the body rather than as a path, because the unit runs
-    with PrivateTmp and cannot see a file another process wrote to /tmp — and
-    because a client on a workstation has no way to place a file on the server at all.
-    """
-
-    text: str
-    scope: ScopeModel | None = None
-
-
-class ImportResponse(BaseModel):
-    exit_code: int
-    stdout: str
-    stderr: str
 
 
 class VerifyResponse(BaseModel):
@@ -101,7 +84,7 @@ class VerifyResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     ok: bool
-    memo_count: int
+    rule_count: int
     scope_rows: int
 
 
@@ -133,23 +116,25 @@ def require_token(
         )
 
 
-def known_memories(settings: Settings) -> dict[str, tuple[str, str]]:
-    """Every memory as `{ref: (date, text)}` — what a scope row is verified
-    against."""
-    return {doc.ref: (doc.date, doc.text) for doc in read_memos(settings.optmem_dir)}
+def known_rules(settings: Settings) -> dict[str, tuple[str, str]]:
+    """Every rule as `{ref: (date, text)}` — what a scope row is verified
+    against. An uninitialised store has none."""
+    try:
+        found = rules.read_rules(settings.rules_dir)
+    except RulesError:
+        return {}
+    return {f"#{r.id}": (r.date, r.text) for r in found}
 
 
 def scopes_in(settings: Settings, stdout: str) -> list[ScopeHit] | None:
-    """Scope for the memories `stdout` names, or None when it names none."""
+    """Scope for the rules `stdout` names, or None when it names none."""
     ids = {int(m.group(1)) for m in REF_RE.finditer(stdout)}
     if not ids:
         return None
     wanted = {
-        doc.ref: (doc.date, doc.text)
-        for doc in read_memos(settings.optmem_dir)
-        if int(doc.ref[1:]) in ids
+        ref: dt for ref, dt in known_rules(settings).items() if int(ref[1:]) in ids
     }
-    found = ScopeStore(settings.optmem_dir).lookup(wanted)
+    found = ScopeStore(settings.rules_dir).lookup(wanted)
     if not found:
         return None
     return [
@@ -175,9 +160,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health(request: Request) -> HealthResponse:
         s: Settings = request.app.state.settings
         return HealthResponse(
-            ok=s.optmem_dir.is_dir(),
-            memo_count=memo_count(s.optmem_dir),
-            scope_rows=len(ScopeStore(s.optmem_dir).rows()),
+            ok=(s.rules_dir / rules.RULES).is_file(),
+            rule_count=rules.rule_count(s.rules_dir),
+            scope_rows=len(ScopeStore(s.rules_dir).rows()),
         )
 
     @app.post("/run", response_model=RunResponse, dependencies=[Depends(require_token)])
@@ -197,14 +182,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else None
         )
         if scope is not None and (body.tool, verb) in REF_CREATING:
-            recorder = ScopeRecorder(ScopeStore(s.optmem_dir), s.optmem_dir, scope)
-        result: RunResult = run_tool(s, body.tool, body.argv, recorder)
+            recorder = ScopeRecorder(ScopeStore(s.rules_dir), s.rules_dir, scope)
+        # The commit's author is the writing machine's role and host.
+        author = (
+            " ".join(p for p in (scope.machine, scope.host) if p) if scope else None
+        )
+        result: RunResult = run_tool(s, body.tool, body.argv, recorder, author)
 
         scopes = None
         if result.exit_code == 0:
             try:
                 scopes = scopes_in(s, result.stdout)
-            except OSError as e:
+            except (OSError, RulesError) as e:
                 # Annotation is never load-bearing: a read must succeed whether
                 # or not scope could be looked up.
                 log.warning("scope lookup failed: %s", e)
@@ -217,21 +206,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/export", dependencies=[Depends(require_token)])
     def export_store(request: Request) -> Response:
-        """The whole store as a gzipped tar, for a machine keeping a mirror.
+        """The rules store as a gzipped tar, for a machine keeping a mirror: the
+        repository with its history (`.git`), `META.jsonl` and `EPOCH`.
 
-        Taken under the write lock, so a note landing mid-read cannot produce a
-        torn `LOG.txt`. The store is tens of kilobytes, so the lock is held for
+        Taken under the write lock, so a write landing mid-read cannot produce a
+        torn copy. The store is tens of kilobytes, so the lock is held for
         milliseconds and the whole thing is built in memory.
 
-        `.lock` is left out: it is a lock file, not data, and `memo` recreates it.
+        `.lock` is left out: it is a lock file, not data, and the tool recreates
+        it.
         """
         s: Settings = request.app.state.settings
         buffer = io.BytesIO()
         with write_lock(s.lock_path), tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-            if s.optmem_dir.is_dir():
+            if s.rules_dir.is_dir():
                 tar.add(
-                    s.optmem_dir,
-                    arcname=s.optmem_dir.name,
+                    s.rules_dir,
+                    arcname=s.rules_dir.name,
                     filter=lambda info: None if info.name.endswith(".lock") else info,
                 )
         return Response(
@@ -242,52 +233,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
-    @app.post(
-        "/import", response_model=ImportResponse, dependencies=[Depends(require_token)]
-    )
-    def import_dump(request: Request, body: ImportRequest) -> ImportResponse:
-        """Append a dump to the shared store — the write-back path.
-
-        `memo import` reads a file, so the text is staged inside the data
-        directory: the only place the unit can both write and read. It is removed
-        whether the import succeeds or fails.
-
-        Scope is recorded for every memory the import creates, by the same
-        recorder and inside the same lock as any other write.
-        """
-        s: Settings = request.app.state.settings
-        if not body.text.strip():
-            raise HTTPException(status_code=400, detail="memhub: the dump is empty")
-
-        staged = s.data_dir / f".import-{os.getpid()}-{threading.get_ident()}.txt"
-        try:
-            staged.write_text(body.text, encoding="utf-8")
-            scope = (
-                Scope.parse(body.scope.model_dump(), s.host_projects)
-                if body.scope
-                else None
-            )
-            recorder = (
-                ScopeRecorder(ScopeStore(s.optmem_dir), s.optmem_dir, scope)
-                if scope is not None
-                else None
-            )
-            result = run_tool(s, "memo", ["import", str(staged)], recorder)
-        finally:
-            staged.unlink(missing_ok=True)
-        return ImportResponse(
-            exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr
-        )
-
     @app.get(
         "/verify", response_model=VerifyResponse, dependencies=[Depends(require_token)]
     )
     def verify(request: Request) -> VerifyResponse:
-        """The third drift defence: which scope rows match no memory,
-        and which memories carry no scope."""
+        """The third drift defence: which scope rows match no rule, and which
+        rules carry no scope."""
         s: Settings = request.app.state.settings
-        store = ScopeStore(s.optmem_dir)
-        report = store.audit(known_memories(s))
+        store = ScopeStore(s.rules_dir)
+        report = store.audit(known_rules(s))
         return VerifyResponse(
             epoch=store.epoch(),
             rows=len(store.rows()),
