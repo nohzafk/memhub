@@ -5,7 +5,7 @@ Every invocation is routed before it runs:
 
   1. `-g`/`--shared` forces the shared store; `-l`/`--local` forces the local one.
      The flag comes first, which is the shape the tools themselves print:
-     `memo -g wake 2 296`, `memo -l nap 16-31 "..."`.
+     `memo -g drop 12`, `memo -l note "..."`.
   2. Otherwise, a cwd under any entry of MEMHUB_LOCAL_ROOTS routes local.
   3. Otherwise, shared.
 
@@ -13,42 +13,54 @@ Rule 2 IS the confidentiality boundary. The server never learns the directory a
 command was typed in, so nothing downstream can make this decision — by the time
 a request reaches /run, work text has already left the machine or it has not.
 
-Shared scope POSTs /run and exits with the tool's own exit code. Local scope
-execs the vendored memo.py, replacing this process, so output and exit codes pass
-through untouched.
+Shared scope POSTs /run and exits with the tool's own exit code. A shared
+write that cannot reach the server waits in the outbox and is sent before the
+next shared call that can. Local scope execs the rules store tool (rules.py),
+replacing this process, so output and exit codes pass through untouched.
 
 Stdlib only, on purpose: the Nix config repo vendors this file into a Nix wrapper and
 the second config repo installs it directly, neither with a dependency closure.
 server/tests/test_client.py runs the scope matrix against it.
 """
 
+import fcntl
 import json
 import os
 import re
 import socket
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 TOOL = "memo"
 DEFAULT_URL = "http://127.0.0.1:8900"
 DEFAULT_TOKEN_FILE = "/run/secrets/memhub-token"
-DEFAULT_STORE = "~/.agents/memory/optmem"
+DEFAULT_STORE = "~/.agents/memory/rules"
+DEFAULT_OUTBOX = "~/.agents/memory/outbox"
 
 # Fail fast on an unreachable server, but give a live one time to answer: a session
 # must never hang at startup because the box is off.
 CONNECT_TIMEOUT = 2.0
 READ_TIMEOUT = 30.0
 
-# Verbs that change the store. They get a different failure message: a lost read
-# can be retried, a lost write is a fact the user still has to record somewhere.
-WRITE_VERBS = {"note", "nap", "import", "forget", "config"}
+# Verbs that change the store. An unreachable server queues them in the outbox;
+# a read has nothing to keep and simply fails.
+READ_VERBS = {"wake", "recall"}
+WRITE_VERBS = {"note", "edit", "drop", "merge"}
+VERBS = READ_VERBS | WRITE_VERBS
 
-USAGE = """memo — durable memory, routed by path.
+USAGE = """memo — durable rules, routed by path.
 
-  memo wake | note "..." | nap | recall <re> | zoom <lo>-<hi> | forget <lo>-<hi>
-  memo config [NAME=N] | import <file>
+  memo wake                          every rule, grouped by tag
+  memo recall <regex>                the rules whose text matches
+  memo note [--here|--anywhere] "..."  add a rule
+  memo edit <id> "..."               replace a rule's text
+  memo drop <id> ["why"]             retire a rule
+  memo merge <id>,<id>[,...] "..."   replace several rules with one
 
   memo -g <cmd>    the shared memory on the server
   memo -l <cmd>    this machine's local memory
@@ -135,9 +147,11 @@ def resolve_scope(argv):
 
 DEFAULT_DENY_FILE = "~/.config/memhub/deny-shared"
 
-# Verbs that carry new text of their own. A read is never gated: `recall
-# <term>` is how you find out whether the leak is already in the store.
-GATED_VERBS = {"note", "nap"}
+# Verbs that carry new text of their own, and how many arguments precede it:
+# `note "<text>"`, `edit <id> "<text>"`, `merge <ids> "<text>"`. A read is
+# never gated: `recall <term>` is how you find out whether the leak is already
+# in the store.
+GATED_VERBS = {"note": 0, "edit": 1, "merge": 1}
 
 
 def deny_patterns():
@@ -174,18 +188,28 @@ def guard_shared(argv):
 
     resolve_scope decides by directory, and a directory is not a topic: work
     done from a cwd outside MEMHUB_LOCAL_ROOTS routes shared even when the text
-    is plainly work, which is how it went wrong before. The shared store has no
-    delete path, so the text is read here, before the request exists."""
-    if argv[0] not in GATED_VERBS or os.environ.get("MEMHUB_ALLOW_SHARED") == "1":
+    is plainly work, which is how it went wrong before. A drop on the server
+    still leaves the text in the store's history, so the text is read here,
+    before the request exists."""
+    verb = argv[0]
+    if verb not in GATED_VERBS or os.environ.get("MEMHUB_ALLOW_SHARED") == "1":
         return
-    text = " ".join(argv[1:])
+    _, args = take_applies(argv)
+    text = " ".join(args[1 + GATED_VERBS[verb] :])
     for pattern, src in deny_patterns():
         hit = pattern.search(text)
         if hit:
+            # An id names a shared rule, so `-l edit <id>` would edit some other
+            # rule: the local way out is always a new note.
+            retire = (
+                ""
+                if verb == "note"
+                else f"\n  {TOOL} -g drop <id>  retires the shared rule instead"
+            )
             die(
                 f'{TOOL}: this text names "{hit.group(0)}" (pattern {src!r}),'
                 " which stays on this machine. Nothing was written.\n"
-                f'  {TOOL} -l {argv[0]} "..."  keeps it local\n'
+                f'  {TOOL} -l note "..."  keeps it local{retire}\n'
                 "  MEMHUB_ALLOW_SHARED=1  overrides this, deliberately",
                 2,
             )
@@ -197,17 +221,17 @@ def guard_shared(argv):
 def local_tool():
     path = os.environ.get("MEMHUB_MEMO_PY")
     if not path:
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "memo.py")
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "rules.py")
     if not os.path.isfile(path):
         die(
-            f"memo: no local memo.py at {path}.\n"
+            f"memo: no local rules.py at {path}.\n"
             "Set MEMHUB_MEMO_PY, or use -g to reach the shared memory."
         )
     return path
 
 
 def run_local(argv):
-    """Hand the process over to the vendored tool. Never returns."""
+    """Hand the process over to the rules store tool. Never returns."""
     env = dict(os.environ)
     # setdefault, not assignment: a caller who has already pointed MEMORY_DIR
     # somewhere means it.
@@ -243,19 +267,23 @@ def unreachable(url, is_write):
     msg = f"memo: memhub unreachable at {url}; shared memory unavailable"
     if is_write:
         msg += (
-            "\nThe memory was NOT recorded. Retry when the server is back, or run"
+            "\nThe rule was NOT recorded. Retry when the server is back, or run"
             '\n  memo -l note "..."\nif the fact must not wait.'
         )
     die(msg)
 
 
-def reachable_or_die(url, is_write):
-    """A 2s TCP probe before the request.
+class Unreachable(Exception):
+    """The transport failed: no connection, or no answer within READ_TIMEOUT."""
+
+
+def probe(url):
+    """A 2s TCP probe before any request.
 
     urlopen takes one timeout for the whole exchange, and 30s of it is right for
     a live server. But the common failure is a server that is simply off, and the
     SessionStart hook runs `memo -g wake` before the session begins — so the
-    unreachable case has to fail in about two seconds, not thirty.
+    unreachable case has to be known in about two seconds, not thirty.
     """
     parts = urlsplit(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -264,16 +292,19 @@ def reachable_or_die(url, is_write):
             (parts.hostname, port), timeout=CONNECT_TIMEOUT
         ).close()
     except OSError:
-        unreachable(base_url(), is_write)
+        return False
+    return True
 
 
-def post(path, payload, is_write=False):
+def send(path, payload):
+    """POST once and return the decoded body of a 2xx answer.
+
+    Raises Unreachable on a transport failure and lets urllib's HTTPError
+    through, so each caller decides what a failure means for it."""
     url = base_url() + path
-    reachable_or_die(url, is_write)
-    data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
-        data=data,
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": "Bearer " + token(),
             "Content-Type": "application/json",
@@ -282,24 +313,27 @@ def post(path, payload, is_write=False):
     )
     try:
         with urllib.request.urlopen(request, timeout=READ_TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        handle_http_error(e, base_url())
-    except OSError:
-        # URLError and socket.timeout are both OSError. This is the host that
-        # accepted the connection and then stalled past READ_TIMEOUT; the probe
-        # above has already caught the host that is simply off.
-        unreachable(base_url(), is_write)
+            raw = response.read()
+    except urllib.error.HTTPError:
+        raise
+    except OSError as e:
+        # URLError, socket.timeout and a dropped connection are all OSError.
+        raise Unreachable(str(e)) from e
+    try:
+        return json.loads(raw.decode("utf-8"))
     except ValueError:
         die(f"memo: {url} answered with something that is not JSON.")
 
 
-def handle_http_error(error, url):
-    detail = ""
+def http_detail(error):
     try:
-        detail = json.loads(error.read().decode("utf-8")).get("detail", "")
-    except (ValueError, OSError):
-        pass
+        return json.loads(error.read().decode("utf-8")).get("detail", "")
+    except (ValueError, OSError, AttributeError):
+        return ""
+
+
+def handle_http_error(error, url):
+    detail = http_detail(error)
     if error.code == 401:
         die(
             f"memo: {url} rejected the token (401).\n"
@@ -310,18 +344,179 @@ def handle_http_error(error, url):
     die(f"memo: {url} answered {error.code}{why}")
 
 
+def run_payload(argv, scope):
+    payload = {"tool": TOOL, "argv": argv}
+    if scope is not None:
+        payload["scope"] = scope
+    return payload
+
+
 def run_shared(argv):
     verb = argv[0]
     declared, argv = take_applies(argv)
-    payload = {"tool": TOOL, "argv": argv}
     scope = scope_payload(declared)
-    if scope is not None:
-        payload["scope"] = scope
-    body = post("/run", payload, is_write=verb in WRITE_VERBS)
+    url = base_url()
+    if not probe(url):
+        return offline(verb, argv, scope)
+    # The hub may go away while the outbox drains. Only a failed probe says so:
+    # one request that timed out is not reason enough to queue this call too.
+    if not replay_outbox() and not probe(url):
+        return offline(verb, argv, scope)
+    try:
+        body = send("/run", run_payload(argv, scope))
+    except urllib.error.HTTPError as e:
+        handle_http_error(e, url)
+    except Unreachable:
+        # The host accepted the connection and then stalled past READ_TIMEOUT.
+        # A write may or may not have landed, so it is not queued: a second
+        # copy of a rule is a worse outcome than a message.
+        unreachable(url, verb in WRITE_VERBS)
     sys.stdout.write(body.get("stdout", ""))
     sys.stderr.write(body.get("stderr", ""))
     print_scope_footer(body.get("scopes"))
     return int(body.get("exit_code", 1))
+
+
+def offline(verb, argv, scope):
+    """The hub is unreachable: a write waits in the outbox, a read fails."""
+    url = base_url()
+    if verb not in WRITE_VERBS:
+        unreachable(url, False)
+    try:
+        n = enqueue(argv, scope)
+    except OSError as e:
+        note_to_stderr(f"memo: cannot write the outbox at {outbox_path()} ({e}).")
+        unreachable(url, True)
+    print(
+        f"memhub unreachable at {url}; queued as outbox entry {n},"
+        " sent on the next shared call."
+    )
+    return 0
+
+
+# ----------------------------------------------------------------- outbox
+#
+# A shared write that could not reach the hub, one JSON object per line:
+# {"ts": <ISO UTC>, "argv": [...], "scope": {...} | null}. Only text that
+# routing already sent to the shared store (and the deny list let through)
+# is ever written here, so the confidentiality boundary is where it was.
+
+
+def outbox_path():
+    return os.path.expanduser(os.environ.get("MEMHUB_OUTBOX") or DEFAULT_OUTBOX)
+
+
+@contextmanager
+def outbox_lock(path):
+    """One process at a time appends to or drains the outbox, so an entry is
+    never sent twice by two sessions that start together. The lock is a
+    sibling file: the outbox itself is replaced on every rewrite."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def read_outbox(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [line for line in fh.read().splitlines() if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def write_outbox(path, lines):
+    """Replace the outbox in one rename, so a crash leaves the old file or the
+    new one and never half of either."""
+    fd, tmp = tempfile.mkstemp(prefix=".outbox.", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(line + "\n" for line in lines))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def enqueue(argv, scope):
+    """Append one call to the outbox; returns its entry number (1-based)."""
+    path = outbox_path()
+    entry = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "argv": argv,
+        "scope": scope,
+    }
+    with outbox_lock(path):
+        lines = read_outbox(path) + [json.dumps(entry)]
+        write_outbox(path, lines)
+    return len(lines)
+
+
+def parse_entry(line):
+    entry = json.loads(line)
+    argv = entry["argv"]
+    if not (isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv)):
+        raise ValueError("argv is not a list of strings")
+    scope = entry.get("scope")
+    if scope is not None and not isinstance(scope, dict):
+        raise ValueError("scope is not an object")
+    return argv, scope
+
+
+def replay_outbox():
+    """Send every queued write, in file order, each as its own request.
+
+    An entry the server answered 200 is done, whatever the tool's exit code: a
+    refusal (a text the tool rejects) would be refused again forever. A
+    transport failure stops the replay and keeps that entry and the rest; an
+    HTTP error does the same, but this call still proceeds. The deny list is
+    not read again: it was read before the entry was queued.
+
+    Returns False when the transport failed."""
+    path = outbox_path()
+    if not os.path.exists(path):
+        return True
+    with outbox_lock(path):
+        lines = read_outbox(path)
+        kept = []
+        reached = True
+        for n, line in enumerate(lines, 1):
+            try:
+                argv, scope = parse_entry(line)
+            except (ValueError, KeyError, TypeError) as e:
+                note_to_stderr(f"outbox entry {n} is unreadable ({e}); kept in {path}")
+                kept.append(line)
+                continue
+            try:
+                body = send("/run", run_payload(argv, scope))
+            except urllib.error.HTTPError as e:
+                why = http_detail(e)
+                note_to_stderr(
+                    f"outbox entry {n} not sent ({e.code}{': ' + why if why else ''});"
+                    " kept with the rest"
+                )
+                kept.extend(lines[n - 1 :])
+                break
+            except Unreachable:
+                kept.extend(lines[n - 1 :])
+                reached = False
+                break
+            if int(body.get("exit_code", 1)) == 0:
+                note_to_stderr(f"outbox: sent entry {n}")
+            else:
+                err = (body.get("stderr") or "").strip() or "no reason given"
+                note_to_stderr(f"outbox entry {n} refused: {err}")
+        if kept != lines:
+            write_outbox(path, kept)
+    return reached
 
 
 # ------------------------------------------------------------------- scope
@@ -464,6 +659,9 @@ def main(argv):
     if not rest:
         print(USAGE)
         return 0
+
+    if rest[0] not in VERBS:
+        die(f"memo: unknown verb {rest[0]!r}.\n\n{USAGE}", 2)
 
     if scope == "local":
         run_local(rest)  # never returns

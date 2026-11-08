@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -40,12 +41,18 @@ BLACKHOLE_URL = "http://192.0.2.1:8900"
 
 
 class Stub:
-    """A memhub the clients can actually talk to."""
+    """A memhub the clients can actually talk to.
+
+    `then` scripts the next answers, one per request, before the default reply
+    takes over: a payload dict (200), a `(payload, status)` pair, `"drop"` (the
+    connection closes with no answer) or `"vanish"` (the server stops listening,
+    then the connection closes with no answer)."""
 
     def __init__(self):
         self.requests: list[dict] = []
         self.status = 200
         self.payload: dict = {"exit_code": 0, "stdout": "", "stderr": ""}
+        self.script: list = []
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -59,8 +66,19 @@ class Stub:
                         "auth": self.headers.get("Authorization"),
                     }
                 )
-                out = json.dumps(stub.payload).encode()
-                self.send_response(stub.status)
+                payload, status = stub.payload, stub.status
+                if stub.script:
+                    action = stub.script.pop(0)
+                    if action == "drop":
+                        return
+                    if action == "vanish":
+                        stub.vanish()
+                        return
+                    payload, status = (
+                        action if isinstance(action, tuple) else (action, 200)
+                    )
+                out = json.dumps(payload).encode()
+                self.send_response(status)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(out)))
                 self.end_headers()
@@ -79,6 +97,22 @@ class Stub:
 
     def reply(self, payload: dict, status: int = 200) -> None:
         self.payload, self.status = payload, status
+
+    def then(self, *actions) -> None:
+        self.script.extend(actions)
+
+    def vanish(self) -> None:
+        """Stop listening, from inside a handler: the serve loop runs in its own
+        thread, so shutting it down here does not wait on this one."""
+        done = threading.Event()
+
+        def close():
+            self.server.shutdown()
+            self.server.server_close()
+            done.set()
+
+        threading.Thread(target=close, daemon=True).start()
+        assert done.wait(5)
 
     def stop(self) -> None:
         self.server.shutdown()
@@ -105,7 +139,7 @@ def local_stubs(tmp_path: Path) -> dict[str, Path]:
 
     They exit 7, which no client produces on its own — that is how the tests know
     an exit code came through the exec rather than from the client."""
-    memo = tmp_path / "memo.py"
+    memo = tmp_path / "rules.py"
     memo.write_text(
         "import os, sys\n"
         "print('LOCAL memo', os.environ.get('MEMORY_DIR'), sys.argv[1:])\n"
@@ -346,7 +380,7 @@ def test_local_memo_gets_the_default_store_and_argv(tmp_path, local_stubs):
         MEMO, ["-l", "note", "a fact"], cwd=tmp_path, local_stubs=local_stubs
     )
     assert r.returncode == 7
-    assert ".agents/memory/optmem" in r.stdout
+    assert ".agents/memory/rules" in r.stdout
     assert "['note', 'a fact']" in r.stdout
 
 
@@ -354,6 +388,42 @@ def test_a_missing_local_tool_says_which_variable_to_set(tmp_path):
     r = run_client(MEMO, ["-l", "wake"], cwd=tmp_path)
     assert r.returncode == 1
     assert "MEMHUB_MEMO_PY" in r.stderr
+    assert f"no local rules.py at {CLIENT_DIR / 'rules.py'}" in r.stderr
+
+
+# ------------------------------------------------------------- the verbs
+
+VERBS = ["wake", "recall", "note", "edit", "drop", "merge"]
+
+
+def test_help_lists_exactly_the_six_verbs(tmp_path):
+    r = run_client(MEMO, ["--help"], cwd=tmp_path)
+    listed = [
+        line.split()[1]
+        for line in r.stdout.splitlines()
+        if line.startswith("  memo ") and not line.strip().startswith("memo -")
+    ]
+    assert listed == VERBS
+
+
+@pytest.mark.parametrize("verb", ["nap", "zoom", "forget", "config", "import", "init"])
+@pytest.mark.parametrize("flag", ["-g", "-l"])
+def test_a_retired_verb_gets_the_usage_error(
+    tmp_path, stub, token_file, local_stubs, verb, flag
+):
+    r = run_client(
+        MEMO,
+        [flag, verb, "x"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        local_stubs=local_stubs,
+    )
+    assert r.returncode == 2
+    assert f"unknown verb {verb!r}" in r.stderr
+    assert "memo -g <cmd>" in r.stderr  # the usage follows
+    assert stub.requests == []
+    assert not went_local(r)
 
 
 # ------------------------------------------------------ the shared route
@@ -431,15 +501,12 @@ def test_an_unreachable_server_fails_a_read_softly(
     assert "NOT recorded" not in r.stderr
 
 
-@pytest.mark.parametrize(("tool", "script"), [("memo", MEMO)], ids=BOTH_IDS)
-def test_an_unreachable_server_tells_a_writer_what_to_do(
-    tool, script, tmp_path, token_file
-):
-    r = run_client(script, ["-g", "note", "a fact"], cwd=tmp_path, token=token_file)
+def test_a_read_from_an_unreachable_server_queues_nothing(tmp_path, token_file):
+    r = run_client(MEMO, ["-g", "recall", "x"], cwd=tmp_path, token=token_file)
 
     assert r.returncode == 1
-    assert "NOT recorded" in r.stderr
-    assert f"{tool} -l note" in r.stderr
+    assert "shared memory unavailable" in r.stderr
+    assert not (tmp_path / ".agents" / "memory" / "outbox").exists()
 
 
 def test_an_unroutable_host_fails_inside_the_connect_budget(tmp_path, token_file):
@@ -969,3 +1036,391 @@ class TestDenyList:
         )
         assert r.returncode == 0
         assert len(stub.requests) == 1
+
+
+# ------------------------------------------------- the deny list on edit and merge
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["edit", "12", "the metastore admin form"],
+        ["merge", "3,4", "metastore and its admin form"],
+        ["note", "--here", "metastore again"],
+    ],
+    ids=["edit", "merge", "note-here"],
+)
+def test_every_verb_that_carries_text_is_gated(tmp_path, stub, token_file, argv):
+    r = run_client(
+        MEMO,
+        ["-g", *argv],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=deny_file(tmp_path, "metastore\n"),
+    )
+    assert r.returncode == 2
+    assert stub.requests == []
+    assert "memo -l note" in r.stderr
+
+
+def test_an_edit_refusal_names_the_drop_of_the_shared_rule(tmp_path, stub, token_file):
+    """An id names a shared rule; `-l edit 12` would edit another rule."""
+    r = run_client(
+        MEMO,
+        ["-g", "edit", "12", "metastore"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=deny_file(tmp_path, "metastore\n"),
+    )
+    assert "memo -g drop <id>" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "argv", [["edit", "12", "harmless"], ["merge", "1,2", "harmless"]]
+)
+def test_only_the_text_is_read_not_the_ids(tmp_path, stub, token_file, argv):
+    r = run_client(
+        MEMO,
+        ["-g", *argv],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=deny_file(tmp_path, "^12$\n1,2\n"),
+    )
+    assert r.returncode == 0
+    assert stub.requests[0]["body"]["argv"] == argv
+
+
+# ------------------------------------------------------------- the outbox
+
+
+def outbox_env(tmp_path: Path) -> dict[str, str]:
+    return {"MEMHUB_OUTBOX": str(tmp_path / "box" / "outbox")}
+
+
+def outbox_lines(tmp_path: Path) -> list[dict]:
+    path = tmp_path / "box" / "outbox"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def seed_outbox(tmp_path: Path, *argvs: list[str], scope=None) -> Path:
+    path = tmp_path / "box" / "outbox"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps({"ts": "2026-01-01T00:00:00+00:00", "argv": a, "scope": scope})
+            + "\n"
+            for a in argvs
+        )
+    )
+    return path
+
+
+QUEUED = "memhub unreachable at {url}; queued as outbox entry {n}, sent on the next shared call."
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["note", "a fact"],
+        ["edit", "3", "new"],
+        ["drop", "3", "stale"],
+        ["merge", "1,2", "one"],
+    ],
+    ids=["note", "edit", "drop", "merge"],
+)
+def test_a_write_to_an_unreachable_hub_is_queued(tmp_path, token_file, argv):
+    r = run_client(
+        MEMO,
+        ["-g", *argv],
+        cwd=tmp_path,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert QUEUED.format(url=DEAD_URL, n=1) in r.stdout
+    [entry] = outbox_lines(tmp_path)
+    assert entry["argv"] == argv
+    assert entry["scope"]["machine"] == "omarchy"
+    assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)
+
+
+def test_the_default_outbox_is_under_the_agents_memory_dir(tmp_path, token_file):
+    run_client(MEMO, ["-g", "note", "a"], cwd=tmp_path, token=token_file)
+    r = run_client(MEMO, ["-g", "note", "b"], cwd=tmp_path, token=token_file)
+
+    assert QUEUED.format(url=DEAD_URL, n=2) in r.stdout
+    path = tmp_path / ".agents" / "memory" / "outbox"
+    assert [json.loads(x)["argv"] for x in path.read_text().splitlines()] == [
+        ["note", "a"],
+        ["note", "b"],
+    ]
+
+
+def test_a_declared_scope_is_queued_as_it_would_have_been_sent(tmp_path, token_file):
+    run_client(
+        MEMO,
+        ["-g", "note", "--anywhere", "a fact"],
+        cwd=tmp_path,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+    [entry] = outbox_lines(tmp_path)
+    assert entry["argv"] == ["note", "a fact"]
+    assert (entry["scope"]["applies"], entry["scope"]["asserted"]) == (
+        "portable",
+        "declared",
+    )
+
+
+def test_a_denied_text_is_never_queued(tmp_path, token_file):
+    """The deny list is read before the outbox, so it never holds such text."""
+    r = run_client(
+        MEMO,
+        ["-g", "note", "metastore"],
+        cwd=tmp_path,
+        token=token_file,
+        env_extra={**outbox_env(tmp_path), **deny_file(tmp_path, "metastore\n")},
+    )
+    assert r.returncode == 2
+    assert outbox_lines(tmp_path) == []
+
+
+def test_a_local_write_never_touches_the_outbox(tmp_path, local_stubs):
+    run_client(
+        MEMO,
+        ["-l", "note", "x"],
+        cwd=tmp_path,
+        local_stubs=local_stubs,
+        env_extra=outbox_env(tmp_path),
+    )
+    assert not (tmp_path / "box").exists()
+
+
+def test_the_next_shared_call_replays_the_outbox_in_order_first(
+    tmp_path, stub, token_file
+):
+    seed_outbox(tmp_path, ["note", "one"], ["edit", "1", "two"], ["drop", "9"])
+    stub.reply({"exit_code": 0, "stdout": "WAKE\n", "stderr": ""})
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert [q["body"]["argv"] for q in stub.requests] == [
+        ["note", "one"],
+        ["edit", "1", "two"],
+        ["drop", "9"],
+        ["wake"],
+    ]
+    assert all(
+        q["path"] == "/run" and q["auth"] == "Bearer sekret-token"
+        for q in stub.requests
+    )
+    # A null stored scope is sent as no scope, as the original call would have.
+    assert "scope" not in stub.requests[0]["body"]
+    assert [ln for ln in r.stderr.splitlines() if ln.startswith("outbox")] == [
+        "outbox: sent entry 1",
+        "outbox: sent entry 2",
+        "outbox: sent entry 3",
+    ]
+    assert r.stdout == "WAKE\n"
+    assert outbox_lines(tmp_path) == []
+
+
+def test_a_replayed_entry_carries_its_stored_scope(tmp_path, stub, token_file):
+    scope = {"machine": "work", "host": "h", "project": None, "actor": None}
+    seed_outbox(tmp_path, ["note", "one"], scope=scope)
+
+    run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert stub.requests[0]["body"]["scope"] == scope
+
+
+def test_a_refused_entry_is_dropped_with_its_reason(tmp_path, stub, token_file):
+    seed_outbox(tmp_path, ["note", ""], ["note", "fine"])
+    stub.then({"exit_code": 1, "stdout": "", "stderr": "the text is empty\n"})
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert "outbox entry 1 refused: the text is empty" in r.stderr
+    assert "outbox: sent entry 2" in r.stderr
+    assert len(stub.requests) == 3
+    assert outbox_lines(tmp_path) == []
+
+
+def test_the_hub_going_away_mid_replay_keeps_the_rest_and_queues_this_write(
+    tmp_path, stub, token_file
+):
+    seed_outbox(tmp_path, ["note", "one"], ["note", "two"], ["note", "three"])
+    stub.then({"exit_code": 0, "stdout": "", "stderr": ""}, "vanish")
+
+    r = run_client(
+        MEMO,
+        ["-g", "note", "four"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert "outbox: sent entry 1" in r.stderr
+    assert QUEUED.format(url=stub.url, n=3) in r.stdout
+    assert [e["argv"] for e in outbox_lines(tmp_path)] == [
+        ["note", "two"],
+        ["note", "three"],
+        ["note", "four"],
+    ]
+
+
+def test_the_hub_going_away_mid_replay_fails_a_read(tmp_path, stub, token_file):
+    seed_outbox(tmp_path, ["note", "one"], ["note", "two"])
+    stub.then("vanish")
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 1
+    assert "shared memory unavailable" in r.stderr
+    assert [e["argv"] for e in outbox_lines(tmp_path)] == [
+        ["note", "one"],
+        ["note", "two"],
+    ]
+
+
+def test_one_lost_answer_stops_the_replay_but_not_this_call(tmp_path, stub, token_file):
+    """The probe still connects, so the hub is up: this call goes through and
+    the unanswered entry waits for the next one."""
+    seed_outbox(tmp_path, ["note", "one"], ["note", "two"], ["note", "three"])
+    stub.then({"exit_code": 0, "stdout": "", "stderr": ""}, "drop")
+    stub.reply({"exit_code": 0, "stdout": "WAKE\n", "stderr": ""})
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert r.stdout == "WAKE\n"
+    assert [q["body"]["argv"] for q in stub.requests] == [
+        ["note", "one"],
+        ["note", "two"],
+        ["wake"],
+    ]
+    assert [e["argv"] for e in outbox_lines(tmp_path)] == [
+        ["note", "two"],
+        ["note", "three"],
+    ]
+
+
+def test_an_http_error_in_replay_keeps_the_outbox_and_runs_this_call(
+    tmp_path, stub, token_file
+):
+    seed_outbox(tmp_path, ["note", "one"], ["note", "two"])
+    stub.then(({"detail": "the store is locked"}, 409))
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert r.returncode == 0
+    assert "outbox entry 1 not sent (409: the store is locked)" in r.stderr
+    assert [q["body"]["argv"] for q in stub.requests] == [["note", "one"], ["wake"]]
+    assert len(outbox_lines(tmp_path)) == 2
+
+
+def test_an_unreadable_entry_is_kept_and_the_rest_replayed(tmp_path, stub, token_file):
+    path = seed_outbox(tmp_path, ["note", "one"])
+    path.write_text("not json\n" + path.read_text())
+
+    r = run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert "outbox entry 1 is unreadable" in r.stderr
+    assert "outbox: sent entry 2" in r.stderr
+    assert path.read_text() == "not json\n"
+
+
+def test_the_outbox_is_rewritten_by_rename(tmp_path, stub, token_file):
+    """A crash mid-rewrite leaves the old file or the new one, never half."""
+    path = seed_outbox(tmp_path, ["note", "one"], ["note", "two"])
+    before = path.stat().st_ino
+    stub.then({"exit_code": 0, "stdout": "", "stderr": ""}, "drop")
+
+    run_client(
+        MEMO,
+        ["-g", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert path.stat().st_ino != before
+    assert [e["argv"] for e in outbox_lines(tmp_path)] == [["note", "two"]]
+    assert sorted(p.name for p in path.parent.iterdir()) == ["outbox", "outbox.lock"]
+
+
+def test_a_local_call_does_not_replay(tmp_path, stub, token_file, local_stubs):
+    seed_outbox(tmp_path, ["note", "one"])
+
+    run_client(
+        MEMO,
+        ["-l", "wake"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        local_stubs=local_stubs,
+        env_extra=outbox_env(tmp_path),
+    )
+
+    assert stub.requests == []
+    assert len(outbox_lines(tmp_path)) == 1

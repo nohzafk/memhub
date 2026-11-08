@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
-# Wipe the shared store and create it again. First step of a re-seed.
+# Wipe the shared rules store and create it again: a new identity.
 #
 #   deploy/reset-store.sh --yes
 #
-# This DESTROYS every memory on the server. It exists because
-# OptMem is append-only: a memory cannot be deleted, only compressed, so the only
-# way to remove one is to start the identity over.
+# This DESTROYS every rule on the server, its history and its scope rows. A
+# single rule is retired with `memo -g drop <id>`; this is for starting over,
+# e.g. before committing a migrated RULES.txt as the store's first content.
 #
-# A re-seed needs exactly this. The smoke test appends a memory dated today, and
-# `memo import` refuses a line dated before the store's newest memory — so
-# seeding a store that has been smoke-tested fails on its first line.
-#
-# It does NOT touch the archives on any Mac.
+# It does NOT touch the retired optmem/ and daily/ archives, nor any Mac.
 set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 main() {
-    [[ "${1:-}" == "--yes" ]] || die "this destroys every shared memory. Re-run with --yes if that is what you want."
+    [[ "${1:-}" == "--yes" ]] || die "this destroys every shared rule. Re-run with --yes if that is what you want."
 
     require ssh
     pve_run true || die "cannot reach $PVE_HOST over SSH."
@@ -32,14 +28,12 @@ main() {
     ct_sh "systemctl stop memhub.service"
 
     log "removing the store"
-    ct_sh "rm -rf $DATA_DIR/optmem"
+    ct_sh "rm -rf $DATA_DIR/rules"
 
     log "creating a fresh store"
-    ct_push "$(repo_root)/server/vendor/memo.py" /tmp/memo.py 0755
-    ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/optmem python3 /tmp/memo.py init >/dev/null"
-    ct_sh "rm -f /tmp/memo.py"
-    ct_sh "sed -i 's|Edit with \`[^\`]*\`|Edit with \`memo -g config NAME=VALUE\`|' \\
-        $DATA_DIR/optmem/config"
+    ct_push "$(repo_root)/server/memhub/rules.py" /tmp/rules.py 0755
+    ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/rules python3 /tmp/rules.py init >/dev/null"
+    ct_sh "rm -f /tmp/rules.py"
 
     log "starting memhub"
     ct_sh "systemctl start memhub.service"

@@ -29,7 +29,8 @@ that answers plausible nonsense.
 | Path | Holds | Backed up |
 |---|---|---|
 | `/opt/memhub` | the release: `memhub/`, `vendor/`, `.venv` | no — redeployable |
-| `/var/lib/memhub/optmem` | **the store** | yes — this is the only irreplaceable data |
+| `/var/lib/memhub/rules` | **the store**: a git repository of `RULES.txt` | yes — this is the only irreplaceable data |
+| `/var/lib/memhub/optmem` | the retired OptMem store, no longer served | yes — kept as an archive |
 | `/var/lib/memhub/daily` | the retired day log, no longer served | yes — kept as an archive |
 | `/etc/memhub/token` | the bearer token | no |
 
@@ -41,12 +42,16 @@ that answers plausible nonsense.
   `226/NAMESPACE` ("Failed to set up mount namespacing"). `provision-ct.sh` sets
   the feature at creation and repairs a container that lacks it; the flag applies
   at boot, so an existing container is rebooted.
-- **The smoke test writes, permanently.** It appends a memory dated today, and
-  `memo import` refuses older dates afterwards — so a smoke run blocks a seeding
-  import of any dump containing older dates until the store is re-created.
-- **`memo init` runs exactly once**, in `provision-ct.sh`. Creating the store is
-  creating the identity, which is why `deploy.sh` never touches either store and
-  the API does not serve `init` at all.
+- **The smoke test writes, permanently.** It notes a marker rule, edits it and
+  drops it: the wake ends as it was, but the marker's id is used up (ids are
+  never reused) and its commits stay in the store's history. A run that fails
+  before the drop leaves the marker in the wake; `memo -g drop <id>` retires it.
+- **`rules.py init` runs exactly once**, in `provision-ct.sh` (and again only in
+  `reset-store.sh`, which starts the store over). Creating the store is creating
+  the identity, which is why `deploy.sh` never touches it and the API does not
+  serve `init` at all.
+- **The container needs `git`.** Every write to the rules store is a commit;
+  `provision-ct.sh` installs it.
 - **The `ME` patch is applied after every push**, because a release overwrites
   `vendor/memo.py` with the repo's unpatched copy. `deploy.sh` verifies the patch
   landed and dies if upstream changed that line.
@@ -58,7 +63,8 @@ that answers plausible nonsense.
 ## Backups
 
 The stores are the only thing here that cannot be rebuilt. Back up
-`/var/lib/memhub` — everything else is a redeploy or a download away. Verify a
+`/var/lib/memhub` (`rules/`, and the archived `optmem/` and `daily/`) — everything
+else is a redeploy or a download away. Verify a
 restore before trusting it: a backup that has never been restored is a hypothesis.
 
 ## Token rotation

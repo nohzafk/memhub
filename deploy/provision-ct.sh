@@ -106,16 +106,18 @@ start_ct() {
 }
 
 install_packages() {
-    if ct_run test -x /usr/bin/rg && ct_run test -x /usr/local/bin/uv; then
+    if ct_run test -x /usr/bin/rg && ct_run test -x /usr/bin/git \
+        && ct_run test -x /usr/local/bin/uv; then
         log "packages and uv already installed"
         return
     fi
-    log "installing python3, curl, ripgrep, uv $UV_VERSION"
+    # git: every write to the rules store is a commit.
+    log "installing python3, curl, git, ripgrep, uv $UV_VERSION"
     # LC_ALL=C because the image has no generated locales, and apt's warnings
     # about it drown the output that matters.
     ct_sh 'LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update -qq'
     ct_sh 'LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        python3 curl ca-certificates ripgrep rsync tar'
+        python3 curl ca-certificates git ripgrep rsync tar'
     # uv is not packaged for Debian 12. The installer is pinned by version, and
     # placed system-wide so the service user and root see the same binary.
     ct_sh "curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh \
@@ -151,27 +153,24 @@ ENV"
 
 init_store() {
     # Creating the store IS creating the identity, so it happens once, here,
-    # deliberately — never from the API, which does not serve `memo init` — and never
-    # from deploy.sh, which runs on every release.
-    if ct_run test -f "$DATA_DIR/optmem/LOG.txt"; then
-        log "OptMem store exists at $DATA_DIR/optmem"
+    # deliberately — never from the API, which does not serve `init` — and never
+    # from deploy.sh, which runs on every release. The release is not installed
+    # yet, so the tool is pushed from this checkout for the one call.
+    if ct_run test -f "$DATA_DIR/rules/RULES.txt"; then
+        log "rules store exists at $DATA_DIR/rules"
     else
-        log "creating the OptMem store"
-        ct_push "$(repo_root)/server/vendor/memo.py" /tmp/memo.py 0755
-        ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/optmem python3 /tmp/memo.py init"
-        ct_sh "rm -f /tmp/memo.py"
-        # memo names itself by its own path, so init writes "/tmp/memo.py config
-        # NAME=VALUE" into the store's config header — a path that is already
-        # gone. `config` is the one file in the store meant to be edited by hand,
-        # and the client reaches this store as `memo -g`.
-        ct_sh "sed -i 's|Edit with \`[^\`]*\`|Edit with \`memo -g config NAME=VALUE\`|' \
-            $DATA_DIR/optmem/config"
+        log "creating the rules store"
+        ct_push "$(repo_root)/server/memhub/rules.py" /tmp/rules.py 0755
+        ct_sh "runuser -u $SERVICE_USER -- env MEMORY_DIR=$DATA_DIR/rules python3 /tmp/rules.py init"
+        ct_sh "rm -f /tmp/rules.py"
     fi
 }
 
 add_to_restic() {
-    # vzdump skips bind mounts, so restic is the only backup path for the data
-    # The include list lives on the host, not in the container.
+    # vzdump skips bind mounts, so restic is the only backup path for the data.
+    # The bind source holds the whole data dir — rules/ and the retired optmem/
+    # and daily/ alike — so one include line covers every store. The include
+    # list lives on the host, not in the container.
     if pve_run test -f "$RESTIC_PATHS"; then
         if pve_run grep -qxF "$BIND_SRC" "$RESTIC_PATHS"; then
             log "restic already covers $BIND_SRC"

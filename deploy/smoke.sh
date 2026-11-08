@@ -4,12 +4,11 @@
 #   deploy/smoke.sh
 #   MEMHUB_URL=http://memhub.example:8900 deploy/smoke.sh
 #
-# WARNING — this writes. OptMem is append-only by design, so the memory this
-# records cannot be deleted, only compressed. It is dated today, and `memo
-# import` refuses a line dated before the last memory in the store. So a smoke
-# run BLOCKS a seeding import of any dump containing older dates until the
-# store is re-created (`rm -rf optmem && memo init` in the container).
-# Smoke first, seed second, and re-init in between.
+# WARNING — this writes to the real store. It notes a marker rule, edits it,
+# and drops it again: the wake ends up as it was, but the marker's id is used
+# up for good (ids are never reused) and its three commits stay in the store's
+# history. If a check fails before the drop, the marker stays in the wake;
+# retire it with `memo -g drop <id>` (the id is printed).
 set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
@@ -18,6 +17,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 MEMHUB_URL="${MEMHUB_URL:-http://$CT_IP:8900}"
 TOKEN_FILE="${MEMHUB_TOKEN_FILE:-/run/secrets/memhub-token}"
 MARKER="memhub smoke test $(date +%Y-%m-%dT%H:%M:%S)"
+MARKER_ID=""
 
 failures=0
 
@@ -28,15 +28,18 @@ main() {
 
     check_health
     check_memo_note
-    check_memo_wake
+    check_memo_edit
+    check_memo_recall
+    check_memo_wake "$MARKER edited" present
+    check_memo_drop
+    check_memo_wake "$MARKER" absent
 
     echo
     if (( failures )); then
         die "$failures check(s) failed — gate G2 is not met."
     fi
     log "gate G2 met against $MEMHUB_URL"
-    warn "this run appended a memory dated $(date +%F). Re-create the store
-       before any seeding import, or 'memo import' will refuse the older dates."
+    warn "this run used up rule id #$MARKER_ID; its commits stay in the store's history."
 }
 
 # --- plumbing ---------------------------------------------------------------
@@ -81,7 +84,7 @@ bad() {
 
 check_health() {
     log "/health"
-    local body
+    local body count
     body="$(curl -fsS --max-time 5 "$MEMHUB_URL/health")" || { bad "unreachable"; return; }
     printf '    %s\n' "$body"
     if [[ "$(printf '%s' "$body" | field ok)" == "True" ]]; then
@@ -89,48 +92,78 @@ check_health() {
     else
         bad "store"
     fi
-
+    count="$(printf '%s' "$body" | field rule_count)"
+    if [[ "$count" =~ ^[0-9]+$ ]]; then
+        ok "rule_count $count"
+    else
+        bad "rule_count missing"
+    fi
 }
 
 check_memo_note() {
     log "memo -g note"
-    local out
+    local out stdout
     out="$(run_tool memo note "$MARKER")" || { bad "note failed"; return; }
-    if [[ "$(printf '%s' "$out" | field exit_code)" == "0" ]]; then
-        ok "recorded"
+    stdout="$(printf '%s' "$out" | field stdout)"
+    if [[ "$(printf '%s' "$out" | field exit_code)" == "0" \
+        && "$stdout" =~ ^Saved\ as\ \#([0-9]+)\.$ ]]; then
+        MARKER_ID="${BASH_REMATCH[1]}"
+        ok "recorded as #$MARKER_ID"
     else
-        bad "recorded"
+        bad "recorded: $stdout"
     fi
 }
 
-# Wake is one document delivered in parts, oldest first, so once the store
-# paginates the freshest memory — the marker check_memo_note just wrote — can
-# only ever be at the end of the LAST part. A single call reads part 1 and
-# therefore fails forever after the store crosses one part. Follow the tool's
-# own continuation footer to the end, exactly as the Claude Code session hook
-# does; the cap is slack against a runaway loop, not a budget anyone reaches.
-check_memo_wake() {
-    log "memo -g wake"
-    local out page doc rest part snapshot count=1
-    out="$(run_tool memo wake)" || { bad "wake failed"; return; }
-    page="$(printf '%s' "$out" | field stdout)"
-    doc="$page"
-    while [[ "$page" == *"Not awake yet. Run:"* ]] && (( count < 8 )); do
-        count=$((count + 1))
-        rest="${page##*Not awake yet. Run: }"
-        rest="${rest%%$'\n'*}"
-        snapshot="${rest##* }"
-        part="${rest% *}"
-        part="${part##* }"
-        [[ "$part" =~ ^[0-9]+$ && "$snapshot" =~ ^[0-9]+$ ]] || break
-        out="$(run_tool memo wake "$part" "$snapshot")" || { bad "wake part $part failed"; return; }
-        page="$(printf '%s' "$out" | field stdout)"
-        doc+=$'\n'"$page"
-    done
-    if printf '%s' "$doc" | grep -qF "$MARKER"; then
-        ok "wake shows the new memory"
+check_memo_edit() {
+    log "memo -g edit"
+    [[ -n "$MARKER_ID" ]] || { bad "no marker to edit"; return; }
+    local out
+    out="$(run_tool memo edit "$MARKER_ID" "$MARKER edited")" || { bad "edit failed"; return; }
+    if [[ "$(printf '%s' "$out" | field exit_code)" == "0" ]]; then
+        ok "edited #$MARKER_ID"
     else
-        bad "wake does not show it"
+        bad "edit: $(printf '%s' "$out" | field stderr)"
+    fi
+}
+
+check_memo_recall() {
+    log "memo -g recall"
+    local out
+    out="$(run_tool memo recall "$MARKER")" || { bad "recall failed"; return; }
+    if printf '%s' "$out" | field stdout | grep -qF "#$MARKER_ID $(date +%F) $MARKER edited"; then
+        ok "recall finds the edited marker"
+    else
+        bad "recall does not find it"
+    fi
+}
+
+# The wake is one page: the whole file, grouped, with its size footer.
+check_memo_wake() {
+    local text="$1" want="$2" out doc
+    log "memo -g wake ($want)"
+    out="$(run_tool memo wake)" || { bad "wake failed"; return; }
+    doc="$(printf '%s' "$out" | field stdout)"
+    if ! printf '%s\n' "$doc" | grep -qE '^[0-9]+ rules, [0-9]+ bytes\.$'; then
+        bad "wake has no size footer"
+    fi
+    local seen=absent
+    printf '%s' "$doc" | grep -qF "$text" && seen=present
+    if [[ "$seen" == "$want" ]]; then
+        ok "wake: the marker is $want"
+    else
+        bad "wake: the marker is $seen, expected $want"
+    fi
+}
+
+check_memo_drop() {
+    log "memo -g drop"
+    [[ -n "$MARKER_ID" ]] || { bad "no marker to drop"; return; }
+    local out
+    out="$(run_tool memo drop "$MARKER_ID" "smoke test marker")" || { bad "drop failed"; return; }
+    if [[ "$(printf '%s' "$out" | field exit_code)" == "0" ]]; then
+        ok "dropped #$MARKER_ID"
+    else
+        bad "drop: $(printf '%s' "$out" | field stderr)"
     fi
 }
 

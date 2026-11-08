@@ -3,28 +3,27 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Promote memories written to the local store into the shared store.
+"""Promote rules written to the local store into the shared store.
 
     uv run tools/promote_local.py --dry-run
     uv run tools/promote_local.py
 
-The local store exists for one purpose: a fact that must not wait while the server
-is unreachable (`memo -l note "..."`). Those memories then live in a second,
-separate store — and OptMem is position-is-identity, so the two can never be
-merged in place. This is the way back: dump the local memories to the import
-format, hand them to the server, and archive the local store so nothing can
-promote it twice.
+The local store holds what a machine kept local (`memo -l note "..."`) and
+what had to be written while the server was out of reach before the outbox
+existed. It is a second store with ids of its own. This is the way back: each
+local rule, in id order, is sent as one `memo note`, the server assigns it a
+new id, and the local store is archived so nothing can be promoted twice.
 
-Why this works when a merge would not: `memo import` appends, and it refuses a
-line dated before the store's newest memory. The local tail was written *after*
-everything on the server, so it appends cleanly and the server assigns the
-canonical ids. Nothing is renumbered and no summary is invalidated.
+Ids are not carried over: a rule's position was never its identity across
+stores, so promotion is an append, not a merge. A local rule that names
+another local rule by id (`corrects #3`) names the wrong one afterwards.
 
-What is lost, deliberately: any `nap` done locally. Those summaries were built
-over local positions, which mean nothing on the server. The server simply carries
-the compression debt instead, which is a prompt rather than a problem.
+The text check is the same on both sides, so a refusal means the local file
+was edited by hand. Promotion stops at the first failure and archives
+nothing; the rules already sent are listed, and must be dropped locally
+(`memo -l drop <id>`) before a second run, or they land twice.
 
-Scope: these memories are recorded with this machine's role and no project.
+Scope: these rules are recorded with this machine's role and no project.
 The local store keeps no record of the directory a note was written in, so
 inventing one would be a guess.
 """
@@ -32,6 +31,7 @@ inventing one would be a guess.
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -41,11 +41,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-LOG_REC = 320
-DEFAULT_STORE = "~/.agents/memory/optmem"
+DEFAULT_STORE = "~/.agents/memory/rules"
 DEFAULT_URL = "http://127.0.0.1:8900"
 DEFAULT_TOKEN_FILE = "~/.config/memhub/token"
 MACHINE_ROLES = ("work", "personal", "omarchy", "nuc", "cloud", "phone")
+RULE = re.compile(r"#(\d+) (\d{4}-\d{2}-\d{2}) (.*)")
 
 
 def die(msg: str) -> None:
@@ -53,23 +53,21 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
-def read_log(store: Path) -> list[tuple[str, str]]:
-    """The local store as (date, text) pairs. Records are sliced as BYTES and
-    decoded one at a time; slicing decoded text would shift every boundary after
-    the first multi-byte character."""
-    log = store / "LOG.txt"
-    if not log.is_file():
-        die(f"no store at {store} (looked for {log})")
-    buf = log.read_bytes()
+def read_rules(store: Path) -> list[tuple[int, str, str]]:
+    """The local store's rules as (id, date, text), in id order. Blank lines
+    and `//` lines are not rules (the store's own format)."""
+    path = store / "RULES.txt"
+    if not path.is_file():
+        die(f"no store at {store} (looked for {path})")
     out = []
-    for i in range(len(buf) // LOG_REC):
-        rec = buf[i * LOG_REC : (i + 1) * LOG_REC].decode("utf-8").rstrip()
-        head, _, rest = rec.partition(" ")
-        stamp, _, text = rest.partition(" ")
-        if head != f"#{i}":
-            die(f"record #{i} of {log} says {head!r}; the log is misaligned")
-        out.append((stamp, text.strip()))
-    return out
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("//"):
+            continue
+        m = RULE.fullmatch(line)
+        if m is None:
+            die(f"{path} line {n} is not a rule: {line!r}")
+        out.append((int(m.group(1)), m.group(2), m.group(3)))
+    return sorted(out)
 
 
 def post(url: str, token: str, path: str, payload: dict) -> dict:
@@ -97,6 +95,17 @@ def post(url: str, token: str, path: str, payload: dict) -> dict:
     return {}
 
 
+def stranded(sent: list[int]) -> None:
+    """Name what already reached the server when promotion stops part-way."""
+    if sent:
+        ids = " ".join(f"#{i}" for i in sent)
+        print(
+            f"promote_local: already sent: {ids}. Drop them locally"
+            " (memo -l drop <id>) before promoting again, or they land twice.",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--store", default=os.environ.get("MEMORY_DIR") or DEFAULT_STORE)
@@ -119,18 +128,17 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     store = Path(args.store).expanduser()
-    rows = read_log(store)
+    rows = read_rules(store)
     if not rows:
         print("promote_local: the local store is empty; nothing to promote.")
         return 0
 
-    dump = "".join(f"{stamp} {text}\n" for stamp, text in rows)
     print(
-        f"promote_local: {len(rows)} local memories, {rows[0][0]}..{rows[-1][0]}",
+        f"promote_local: {len(rows)} local rules, #{rows[0][0]}..#{rows[-1][0]}",
         file=sys.stderr,
     )
     if args.dry_run:
-        sys.stdout.write(dump)
+        sys.stdout.write("".join(f"#{i} {date} {text}\n" for i, date, text in rows))
         return 0
 
     if args.machine and args.machine not in MACHINE_ROLES:
@@ -142,30 +150,37 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         die(f"cannot read the token at {token_path} ({e.strerror or e})")
 
-    payload: dict = {"text": dump}
+    scope = None
     if args.machine:
         # No project: the local store keeps no record of where a note was
         # written, and guessing one would be worse than saying nothing.
-        payload["scope"] = {
+        scope = {
             "machine": args.machine,
             "host": socket.gethostname(),
             "project": None,
         }
 
-    body = post(args.url, token, "/import", payload)
-    sys.stdout.write(body.get("stdout", ""))
-    sys.stderr.write(body.get("stderr", ""))
-    if body.get("exit_code") != 0:
-        die(
-            "the import was refused, so the local store is untouched.\n"
-            "       A date older than the shared store's newest memory is the"
-            " usual cause."
-        )
+    sent: list[int] = []
+    for rule_id, _date, text in rows:
+        payload: dict = {"tool": "memo", "argv": ["note", text]}
+        if scope is not None:
+            payload["scope"] = scope
+        try:
+            body = post(args.url, token, "/run", payload)
+        except SystemExit:
+            stranded(sent)
+            raise
+        sys.stdout.write(f"#{rule_id} -> {body.get('stdout', '')}")
+        if body.get("exit_code") != 0:
+            sys.stderr.write(body.get("stderr", ""))
+            stranded(sent)
+            die(f"local rule #{rule_id} was refused; nothing was archived.")
+        sent.append(rule_id)
 
     if args.keep:
         print(
             "promote_local: the local store was NOT archived. Promote it again and"
-            " these memories land twice.",
+            " these rules land twice.",
             file=sys.stderr,
         )
         return 0
@@ -190,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"promote_local: fresh local store at {store}", file=sys.stderr)
     else:
         print(
-            "promote_local: recreate the local store with: memo -l init",
+            "promote_local: recreate the local store with:"
+            f" MEMORY_DIR={store} python3 rules.py init",
             file=sys.stderr,
         )
     return 0

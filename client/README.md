@@ -10,7 +10,7 @@ runs the whole scope matrix against it.
 ## Routing
 
 1. `-g`/`--shared` or `-l`/`--local`, **first argument only** — the position the
-   tools themselves print (`memo -g wake 2 296`).
+   tools themselves print (`memo -g drop 12`).
 2. Otherwise a cwd under any entry of `MEMHUB_LOCAL_ROOTS` → local.
 3. Otherwise → shared.
 
@@ -20,15 +20,31 @@ fact. Hence the deliberate asymmetry: if the cwd cannot be determined at all and
 local roots are configured, the client routes **local** — a shared memory in the
 local store is recoverable, work text on the server is not.
 
+## Verbs
+
+| verb | effect | writes |
+|---|---|---|
+| `wake` | print every rule, grouped by tag, with a size footer | no |
+| `recall <regex>` | print every rule whose text matches, case-insensitive | no |
+| `note [--here\|--anywhere] "<text>"` | add a rule; prints `Saved as #<id>.` | yes |
+| `edit <id> "<text>"` | replace a rule's text in place | yes |
+| `drop <id> ["<why>"]` | retire a rule; the reason goes in the commit message | yes |
+| `merge <id>,<id>[,…] "<text>"` | replace the listed rules with one new rule | yes |
+
+Any other verb is a usage error (exit 2) and goes nowhere. The tool behind both
+scopes is the rules store (`rules.py`); its contract is
+[the design](../docs/rules-store.md).
+
 ## The deny list
 
 Rule 2 protects a directory, not a topic. Work done from a cwd outside
 `MEMHUB_LOCAL_ROOTS` routes shared even when the text is plainly work — that is
-not hypothetical, it happened, and the shared store has no delete path to undo
-it with.
+not hypothetical, it happened, and a `drop` on the server still leaves the text
+in the store's history.
 
-So a `note` (and a `nap` line) bound for the shared store is matched against a
-list of regexes first, one per line, `#` starting a comment:
+So the text of a `note`, `edit` or `merge` bound for the shared store is
+matched against a list of regexes first, one per line, `#` starting a comment.
+Only the text is read, not an id or an id list:
 
 ```
 # ~/.config/memhub/deny-shared — never let these reach the shared store
@@ -37,8 +53,9 @@ APP-[0-9]{3,}
 talpa
 ```
 
-A hit refuses the write, names the term, and prints the command that would have
-been right (`memo -l note …`). Matching is case-insensitive. An unreadable
+A hit refuses the write (exit 2), names the term, and prints the command that
+would have been right (`memo -l note …`; for an `edit` or `merge`, also
+`memo -g drop <id>` to retire the shared rule). Matching is case-insensitive. An unreadable
 pattern is a hard error rather than a skipped line: a gate that silently stops
 gating is worse than none.
 
@@ -61,7 +78,9 @@ needs it: to write down which words are work-only, a memory has to name them.
 | `MEMHUB_LOCAL_ROOTS` | **required** | colon-separated paths that stay on this machine, or the literal `none`. Empty entries within the list are ignored |
 | `MEMHUB_MACHINE` | **required** | this machine's **role**: `work`, `personal`, `omarchy`, `nuc`, `cloud`, `phone` |
 | `MEMHUB_ACTOR` | unset | which agent is writing: `claude-code`, `codex`, … |
-| `MEMHUB_MEMO_PY` | `memo.py` beside the client | the vendored tool for local scope |
+| `MEMHUB_MEMO_PY` | `rules.py` beside the client | the rules store tool for local scope |
+| `MEMORY_DIR` | `~/.agents/memory/rules` | the local store, for local scope only |
+| `MEMHUB_OUTBOX` | `~/.agents/memory/outbox` | shared writes waiting for the server |
 
 Per machine:
 
@@ -131,25 +150,69 @@ MEMORY_DIR=~/.agents/memory/mirror/optmem memo -l wake    # read it offline
 identities that can never be merged. A download that fails verification is
 discarded rather than swapped in, so a truncated fetch cannot destroy a good copy.
 
+## The outbox
+
+A shared write (`note`, `edit`, `drop`, `merge`) that cannot reach the server
+is not lost. It is appended to `~/.agents/memory/outbox` (`MEMHUB_OUTBOX`), one
+JSON line per call:
+
+```json
+{"ts": "2026-05-01T09:30:00+00:00", "argv": ["note", "..."], "scope": {...}}
+```
+
+`argv` and `scope` are exactly what the request would have carried (`scope`
+is `null` when there is none). The client prints
+`memhub unreachable at <url>; queued as outbox entry <n>, sent on the next shared call.`
+on stdout and exits 0. A read (`wake`, `recall`) has nothing to keep and fails
+as before.
+
+The next shared call of any verb whose connect probe succeeds replays the outbox
+first, in file order, each entry as its own `/run` request with its stored
+scope, and prints one line per entry on stderr before its own output:
+
+- an entry the server answers 200 is removed, whatever the tool's exit code:
+  `outbox: sent entry <n>`, or `outbox entry <n> refused: <stderr>` when the tool
+  rejected it (a text check; it would be rejected again forever);
+- a transport failure stops the replay and keeps that entry and the rest. If
+  the probe now fails too, the server is gone and the call itself queues (a
+  write) or fails (a read); otherwise it proceeds;
+- an HTTP error (a 401, a 409) stops the replay the same way, and the call
+  proceeds;
+- an unreadable line is kept and skipped.
+
+The deny list is not read again at replay: it was read before the entry was
+queued. Only text that routing already sent to the shared store, and the deny
+list let through, ever enters the outbox, so the confidentiality boundary is
+where it was. The file is rewritten in one rename after each replay, and a lock
+beside it (`outbox.lock`) keeps two sessions from sending one entry twice.
+There is no daemon: a machine that makes no shared call sends nothing.
+
+An entry whose request reached the server but whose answer was lost is sent
+again, so it can land twice; drop the copy.
+
 ## Writing back
 
-If the server is unreachable and a fact must not wait, `memo -l note "..."` puts it
-in the local store. Later:
+The local store is a separate store with ids of its own. To move its rules to
+the shared store:
 
 ```sh
 uv run tools/promote_local.py --dry-run   # see what would be sent
-uv run tools/promote_local.py             # import it, then archive the local store
+uv run tools/promote_local.py             # note each one, then archive the local store
 ```
 
-It appends rather than merges — the local tail is newer than everything on the
-server, which is exactly what `memo import` accepts — and the server assigns the
-canonical ids.
+Each local rule is sent as one `memo note`, in id order, and the server assigns
+it a new id: position was never identity across stores, so this is an append.
+It stops at the first refusal and archives nothing, naming what was already sent.
 
 ## Behaviour worth knowing
 
 - **Local scope execs the tool**, replacing the process, so exit codes, stdout,
   stderr and paging behave exactly as they do today.
-- **Unreachable server**: `memhub unreachable at <url>; shared memory unavailable`
-  on stderr, exit 1. A write adds that it was *not* recorded and how to record it
-  locally. The connect probe is bounded at 2s so a SessionStart hook on a machine
-  whose server is off costs two seconds, not thirty.
+- **Unreachable server**: a read prints
+  `memhub unreachable at <url>; shared memory unavailable` on stderr and exits 1;
+  a write is queued in the outbox and exits 0. The connect probe is bounded at 2s
+  so a SessionStart hook on a machine whose server is off costs two seconds, not
+  thirty.
+- **A server that accepts and then stalls** past 30s fails the call with the
+  unreachable message, and a write is *not* queued: it may have landed, and a
+  second copy is worse than a message.
