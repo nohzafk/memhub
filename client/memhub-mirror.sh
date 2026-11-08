@@ -44,11 +44,16 @@ die() {
 # A mirror is only worth having if it is whole. Every check answers one question:
 # would this still work if it were promoted to be the store?
 verify_tree() {
-    local dir="$1/rules" bad rules
+    local dir="$1/rules" bad rules next
 
     [[ -f "$dir/RULES.txt" ]] || { echo "no rules/RULES.txt"; return 1; }
     [[ -f "$dir/NEXT" ]] || { echo "no rules/NEXT"; return 1; }
     [[ -d "$dir/.git" ]] || { echo "no rules/.git: the history is missing"; return 1; }
+
+    # NEXT is the id the next write gets; rules.py refuses a store whose NEXT
+    # is not a positive integer, so a promoted mirror holding one would too.
+    next="$(< "$dir/NEXT")"
+    [[ "$next" =~ ^[[:space:]]*0*[1-9][0-9]*[[:space:]]*$ ]] || { echo "rules/NEXT does not hold a positive id: '$next'"; return 1; }
 
     # Bytes, not characters: a rule's UTF-8 text must not trip the locale.
     bad="$(LC_ALL=C grep -nEv "$RULE_LINE" "$dir/RULES.txt" | head -n 1 || true)"

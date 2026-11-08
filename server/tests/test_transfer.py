@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
 from conftest import TOKEN
 from fastapi.testclient import TestClient
 
@@ -128,6 +129,20 @@ def test_the_mirror_script_rejects_a_damaged_export(client: TestClient, tmp_path
     (rules_dir / "RULES.txt").write_text("", encoding="utf-8")
     (rules_dir / "META.jsonl").write_text("{broken\n", encoding="utf-8")
     assert "META.jsonl" in verify_mirror(tmp_path / "mirror").stderr
+
+
+@pytest.mark.parametrize("next_id", ["", "0\n", "abc\n", "-3\n", "1 2\n"])
+def test_the_mirror_script_rejects_a_next_that_is_not_a_positive_id(
+    client: TestClient, tmp_path: Path, next_id: str
+):
+    with tarfile.open(fileobj=io.BytesIO(client.get("/export").content)) as tar:
+        tar.extractall(tmp_path / "mirror", filter="data")
+    (tmp_path / "mirror" / "rules" / "NEXT").write_text(next_id, encoding="utf-8")
+
+    r = verify_mirror(tmp_path / "mirror")
+
+    assert r.returncode == 1
+    assert "NEXT does not hold a positive id" in r.stderr
 
 
 def test_export_needs_the_token(anon: TestClient):
