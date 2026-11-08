@@ -28,7 +28,7 @@ main() {
 
     run_gate_g1
     push_code
-    patch_memo_scope
+    ensure_git
     sync_venv
     install_token
     install_units
@@ -58,28 +58,30 @@ push_code() {
     local tar="/tmp/memhub-release.$$.tgz"
     tar czf "$tar" -C "$(repo_root)/server" \
         --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache' \
-        --exclude='.ruff_cache' --exclude='tests' .
+        --exclude='.ruff_cache' --exclude='tests' --exclude='vendor' .
     ct_sh "mkdir -p $APP_DIR"
+    # vendor/ holds OptMem's memo.py for the migration tools' tests only; a
+    # release older than the rules store left a copy here.
+    ct_sh "rm -rf $APP_DIR/vendor"
     ct_push "$tar" /tmp/memhub-release.tgz 0600
     ct_sh "tar xzf /tmp/memhub-release.tgz -C $APP_DIR && rm -f /tmp/memhub-release.tgz"
     ct_sh "chown -R root:root $APP_DIR"
     rm -f "$tar"
 }
 
-# Every continuation command the server-side memo prints — `memo -g wake 2 296`,
-# `memo -g nap 16-31 "..."` — has to route back to the shared store from any cwd
-# on any machine. Upstream memo names itself by its own path, which would print
-# a path that exists only inside the container.
-patch_memo_scope() {
-    local memo="$APP_DIR/vendor/memo.py"
-    if ct_sh "grep -qxF 'ME = \"memo -g\"' $memo"; then
-        log "memo.py already scoped to 'memo -g'"
+# Every write to the rules store is a git commit. provision-ct.sh installs git;
+# a container provisioned before the rules store has none.
+ensure_git() {
+    if ct_run test -x /usr/bin/git; then
+        log "git already installed"
         return
     fi
-    log "patching vendor/memo.py: ME = \"memo -g\""
-    ct_sh "sed -i 's|^ME = pretty(__file__)$|ME = \"memo -g\"|' $memo"
-    ct_sh "grep -qxF 'ME = \"memo -g\"' $memo" \
-        || die "the ME patch did not apply — upstream memo.py changed that line."
+    log "installing git"
+    # LC_ALL=C because the image has no generated locales, and apt's warnings
+    # about it drown the output that matters.
+    ct_sh 'LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update -qq'
+    ct_sh 'LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git'
+    ct_run test -x /usr/bin/git || die "apt-get installed no /usr/bin/git."
 }
 
 sync_venv() {

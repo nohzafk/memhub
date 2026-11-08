@@ -28,7 +28,7 @@ that answers plausible nonsense.
 
 | Path | Holds | Backed up |
 |---|---|---|
-| `/opt/memhub` | the release: `memhub/`, `vendor/`, `.venv` | no — redeployable |
+| `/opt/memhub` | the release: `memhub/`, `.venv` | no — redeployable |
 | `/var/lib/memhub/rules` | **the store**: a git repository of `RULES.txt` | yes — this is the only irreplaceable data |
 | `/var/lib/memhub/optmem` | the retired OptMem store, no longer served | yes — kept as an archive |
 | `/var/lib/memhub/daily` | the retired day log, no longer served | yes — kept as an archive |
@@ -51,10 +51,8 @@ that answers plausible nonsense.
   the identity, which is why `deploy.sh` never touches it and the API does not
   serve `init` at all.
 - **The container needs `git`.** Every write to the rules store is a commit;
-  `provision-ct.sh` installs it.
-- **The `ME` patch is applied after every push**, because a release overwrites
-  `vendor/memo.py` with the repo's unpatched copy. `deploy.sh` verifies the patch
-  landed and dies if upstream changed that line.
+  `provision-ct.sh` installs it, and `deploy.sh` installs it on a container
+  provisioned without it.
 - **The unit keeps `/` read-only** (`ProtectSystem=strict`) with `/var/lib/memhub`
   as the single writable path. That is why `memhub.service` runs
   `.venv/bin/uvicorn` directly instead of `uv run`: `uv run` wants the network and

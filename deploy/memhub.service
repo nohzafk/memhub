@@ -19,14 +19,16 @@ Restart=on-failure
 RestartSec=3
 
 NoNewPrivileges=yes
-# memo.py needs a temp dir for its lock file.
+# Nothing here shares /tmp with the host; the store's lock files live in
+# /var/lib/memhub.
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
 RestrictSUIDSGID=yes
-# The one writable path: both stores and the index live here.
+# The one writable path: the rules store, and the retired stores kept as an
+# archive, live here.
 ReadWritePaths=/var/lib/memhub
 
 [Install]
