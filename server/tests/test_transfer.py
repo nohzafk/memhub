@@ -7,6 +7,7 @@ history and `META.jsonl` all stay valid, so it can be promoted to be the store.
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -76,6 +77,57 @@ def test_export_of_a_fresh_store_still_unpacks(client: TestClient):
     files = members(client.get("/export").content)
     assert files["rules/RULES.txt"] == b""
     assert files["rules/NEXT"] == b"1\n"
+
+
+MIRROR_SH = Path(__file__).resolve().parents[2] / "client" / "memhub-mirror.sh"
+
+
+def verify_mirror(mirror: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", str(MIRROR_SH), "--verify"],
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(mirror.parent),
+            "MEMHUB_MIRROR_DIR": str(mirror),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_mirror_script_accepts_an_export(client: TestClient, tmp_path: Path):
+    client.post(
+        "/run", json={"tool": "memo", "argv": ["note", "a fact"], "scope": OMARCHY}
+    )
+    client.post("/run", json={"tool": "memo", "argv": ["note", "#tag ünïcode"]})
+    with tarfile.open(fileobj=io.BytesIO(client.get("/export").content)) as tar:
+        tar.extractall(tmp_path / "mirror", filter="data")
+    rules_txt = tmp_path / "mirror" / "rules" / "RULES.txt"
+    with rules_txt.open("a", encoding="utf-8") as fh:
+        fh.write("\n// a comment\n")
+
+    r = verify_mirror(tmp_path / "mirror")
+
+    assert r.returncode == 0, r.stderr
+    assert "2 rules" in r.stdout
+
+
+def test_the_mirror_script_rejects_a_damaged_export(client: TestClient, tmp_path: Path):
+    client.post("/run", json={"tool": "memo", "argv": ["note", "a fact"]})
+    with tarfile.open(fileobj=io.BytesIO(client.get("/export").content)) as tar:
+        tar.extractall(tmp_path / "mirror", filter="data")
+    rules_dir = tmp_path / "mirror" / "rules"
+    with (rules_dir / "RULES.txt").open("a", encoding="utf-8") as fh:
+        fh.write("#2 not-a-date truncated\n")
+
+    r = verify_mirror(tmp_path / "mirror")
+    assert r.returncode == 1
+    assert "line 2 is not a rule" in r.stderr
+
+    (rules_dir / "RULES.txt").write_text("", encoding="utf-8")
+    (rules_dir / "META.jsonl").write_text("{broken\n", encoding="utf-8")
+    assert "META.jsonl" in verify_mirror(tmp_path / "mirror").stderr
 
 
 def test_export_needs_the_token(anon: TestClient):

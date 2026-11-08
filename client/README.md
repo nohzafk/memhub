@@ -42,9 +42,10 @@ Rule 2 protects a directory, not a topic. Work done from a cwd outside
 not hypothetical, it happened, and a `drop` on the server still leaves the text
 in the store's history.
 
-So the text of a `note`, `edit` or `merge` bound for the shared store is
-matched against a list of regexes first, one per line, `#` starting a comment.
-Only the text is read, not an id or an id list:
+So the text of a `note`, `edit` or `merge`, and the reason of a `drop`
+(it lands in the server's git history), bound for the shared store is matched
+against a list of regexes first, one per line, `#` starting a comment. Only the
+text is read, not an id or an id list:
 
 ```
 # ~/.config/memhub/deny-shared — never let these reach the shared store
@@ -55,7 +56,8 @@ talpa
 
 A hit refuses the write (exit 2), names the term, and prints the command that
 would have been right (`memo -l note …`; for an `edit` or `merge`, also
-`memo -g drop <id>` to retire the shared rule). Matching is case-insensitive. An unreadable
+`memo -g drop <id>` to retire the shared rule; for a `drop`, the same drop
+without a reason). Matching is case-insensitive. An unreadable
 pattern is a hard error rather than a skipped line: a gate that silently stops
 gating is worse than none.
 
@@ -136,19 +138,26 @@ foreign however far away it was written:
 ## The mirror
 
 `memhub-mirror.sh` pulls the whole store from `GET /export` on an hourly timer
-and swaps it into `~/.agents/memory/mirror`, read-only. It is a byte copy, so it
-is promotable — move it into a server's data dir and it *is* the store, ids and
-`TREE/` and `META.jsonl` intact.
+and swaps it into `~/.agents/memory/mirror`, read-only. It is a byte copy of
+`rules/` — `RULES.txt`, `NEXT`, the git history, `META.jsonl` and `EPOCH` — so
+it is promotable: copy `<mirror>/rules` into a new server's data dir, give it
+to the service user, start the service, and it *is* the store, every id, the
+next id and every scope row intact.
 
 ```sh
 memhub-mirror              # refresh
 memhub-mirror --verify     # check it and say what it holds
-MEMORY_DIR=~/.agents/memory/mirror/optmem memo -l wake    # read it offline
+MEMORY_DIR=~/.agents/memory/mirror/rules memo -l wake    # read it offline
 ```
 
-**Never write to the mirror.** Two OptMem stores that both take writes are two
-identities that can never be merged. A download that fails verification is
-discarded rather than swapped in, so a truncated fetch cannot destroy a good copy.
+A copy passes verification when `rules/RULES.txt`, `rules/NEXT` and the
+`rules/.git` directory are there, every line of `RULES.txt` is blank, a `//`
+comment or a rule (`#<id> <YYYY-MM-DD> <text>`), and `META.jsonl`, if present,
+is valid JSONL. A download that fails verification is discarded rather than
+swapped in, so a truncated fetch cannot destroy a good copy.
+
+**Never write to the mirror.** The hub is the one writer; a second store that
+takes writes would hand out the hub's ids to other rules.
 
 ## The outbox
 

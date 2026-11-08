@@ -4,32 +4,37 @@
 #   memhub-mirror              # refresh the mirror
 #   memhub-mirror --verify     # check the current mirror and say what it holds
 #
-# Why a mirror and not a second writer: OptMem is position-is-identity, so two
-# stores that both accept writes are two identities that can never be merged
-#. A mirror is a *copy* — nothing writes to it, so it cannot fork. That
-# is the whole reason it is safe, and the reason it must stay read-only.
+# Why a mirror and not a second writer: the shared store has one writer, the
+# hub, which hands out ids that are never reused. Two stores that both accept
+# writes would hand out the same ids to different rules. A mirror is a *copy* —
+# nothing writes to it, so it cannot fork. That is the whole reason it is safe,
+# and the reason it must stay read-only.
 #
 # What it is for:
-#   * a second copy of the memories, independent of the server's own backups
-#   * offline reads:  MEMORY_DIR=<mirror>/optmem memo -l wake
+#   * a second copy of the rules and their git history, independent of the
+#     server's own backups
+#   * offline reads:  MEMORY_DIR=<mirror>/rules memo -l wake
 #   * disaster recovery: promote it (see below)
 #
-# If the server is unreachable and a fact must not wait, write it to the local store
-# with `memo -l note "..."` and promote it later with tools/promote_local.py. Do
-# NOT write into the mirror: that is exactly the fork this design avoids.
+# A shared write made while the server is unreachable waits in the client's
+# outbox and is sent on the next shared call. Do NOT write into the mirror:
+# that is exactly the fork this design avoids.
 #
 # Promoting a mirror to be the store, if the server is gone for good:
-#   1. Copy <mirror>/optmem into the new server's data dir.
-#   2. chown them to the service user and make them writable again, then start it.
-#   3. Every memory keeps its id, so TREE/ and META.jsonl stay valid. That is
-#      what a byte copy buys, and what a filtered copy could not.
+#   1. Copy <mirror>/rules into the new server's data dir, as <data>/rules.
+#   2. chown it to the service user and make it writable again, then start it.
+#   3. Every rule keeps its id, NEXT keeps the next one, and META.jsonl and
+#      EPOCH stay valid. That is what a byte copy buys, and what a filtered
+#      copy could not.
 set -euo pipefail
 
 MEMHUB_URL="${MEMHUB_URL:-http://127.0.0.1:8900}"
 MEMHUB_TOKEN_FILE="${MEMHUB_TOKEN_FILE:-$HOME/.config/memhub/token}"
 MIRROR_DIR="${MEMHUB_MIRROR_DIR:-$HOME/.agents/memory/mirror}"
 
-LOG_REC=320
+# A RULES.txt line is blank, a `//` comment, or a rule. Same grammar as
+# rules.py, which refuses to read a store holding any other line.
+RULE_LINE='^[[:space:]]*$|^//|^#[0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2} .+$'
 
 die() {
     printf 'memhub-mirror: %s\n' "$*" >&2
@@ -39,32 +44,33 @@ die() {
 # A mirror is only worth having if it is whole. Every check answers one question:
 # would this still work if it were promoted to be the store?
 verify_tree() {
-    local dir="$1" log="$1/optmem/LOG.txt" size records
+    local dir="$1/rules" bad rules
 
-    [[ -f "$log" ]] || { echo "no optmem/LOG.txt"; return 1; }
-    # GNU stat on Linux and under the Nix wrapper; BSD stat when the script is
-    # run by hand on a workstation whose PATH has no coreutils.
-    size="$(stat -c %s "$log" 2>/dev/null || stat -f%z "$log")"
-    if (( size % LOG_REC != 0 )); then
-        echo "LOG.txt is $size bytes, not a multiple of $LOG_REC — truncated"
+    [[ -f "$dir/RULES.txt" ]] || { echo "no rules/RULES.txt"; return 1; }
+    [[ -f "$dir/NEXT" ]] || { echo "no rules/NEXT"; return 1; }
+    [[ -d "$dir/.git" ]] || { echo "no rules/.git: the history is missing"; return 1; }
+
+    # Bytes, not characters: a rule's UTF-8 text must not trip the locale.
+    bad="$(LC_ALL=C grep -nEv "$RULE_LINE" "$dir/RULES.txt" | head -n 1 || true)"
+    if [[ -n "$bad" ]]; then
+        echo "RULES.txt line ${bad%%:*} is not a rule: ${bad#*:}"
         return 1
     fi
-    records=$(( size / LOG_REC ))
-    [[ -f "$dir/optmem/config" ]] || { echo "no optmem/config"; return 1; }
+    rules="$(LC_ALL=C grep -c '^#' "$dir/RULES.txt" || true)"
 
-    # META.jsonl is optional — a store older than scope has none — but if it is
-    # there it must parse, or the annotations it feeds would be wrong.
-    if [[ -f "$dir/optmem/META.jsonl" ]] && ! python3 -c '
+    # META.jsonl is optional — a store with no scoped write has none — but if
+    # it is there it must parse, or the annotations it feeds would be wrong.
+    if [[ -f "$dir/META.jsonl" ]] && ! python3 -c '
 import json, sys
 for line in open(sys.argv[1], encoding="utf-8"):
     if line.strip():
         json.loads(line)
-' "$dir/optmem/META.jsonl" 2>/dev/null; then
+' "$dir/META.jsonl" 2>/dev/null; then
         echo "META.jsonl is not valid JSONL"
         return 1
     fi
 
-    echo "$records memories"
+    echo "$rules rules"
 }
 
 if [[ "${1:-}" == "--verify" ]]; then

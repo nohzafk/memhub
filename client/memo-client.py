@@ -147,11 +147,12 @@ def resolve_scope(argv):
 
 DEFAULT_DENY_FILE = "~/.config/memhub/deny-shared"
 
-# Verbs that carry new text of their own, and how many arguments precede it:
-# `note "<text>"`, `edit <id> "<text>"`, `merge <ids> "<text>"`. A read is
-# never gated: `recall <term>` is how you find out whether the leak is already
-# in the store.
-GATED_VERBS = {"note": 0, "edit": 1, "merge": 1}
+# Verbs that carry text of their own, and how many arguments precede it:
+# `note "<text>"`, `edit <id> "<text>"`, `merge <ids> "<text>"`, and
+# `drop <id> "<why>"`, whose reason lands in the server's git history. A read
+# is never gated: `recall <term>` is how you find out whether the leak is
+# already in the store.
+GATED_VERBS = {"note": 0, "edit": 1, "merge": 1, "drop": 1}
 
 
 def deny_patterns():
@@ -200,16 +201,21 @@ def guard_shared(argv):
         hit = pattern.search(text)
         if hit:
             # An id names a shared rule, so `-l edit <id>` would edit some other
-            # rule: the local way out is always a new note.
-            retire = (
-                ""
-                if verb == "note"
-                else f"\n  {TOOL} -g drop <id>  retires the shared rule instead"
-            )
+            # rule: the local way out is always a new note. A drop's reason has
+            # no local home; the drop itself needs none.
+            if verb == "drop":
+                way_out = f"  {TOOL} -g drop <id>  drops it without a reason"
+            else:
+                retire = (
+                    ""
+                    if verb == "note"
+                    else f"\n  {TOOL} -g drop <id>  retires the shared rule instead"
+                )
+                way_out = f'  {TOOL} -l note "..."  keeps it local{retire}'
             die(
                 f'{TOOL}: this text names "{hit.group(0)}" (pattern {src!r}),'
                 " which stays on this machine. Nothing was written.\n"
-                f'  {TOOL} -l note "..."  keeps it local{retire}\n'
+                f"{way_out}\n"
                 "  MEMHUB_ALLOW_SHARED=1  overrides this, deliberately",
                 2,
             )

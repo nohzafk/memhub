@@ -1077,8 +1077,39 @@ def test_an_edit_refusal_names_the_drop_of_the_shared_rule(tmp_path, stub, token
     assert "memo -g drop <id>" in r.stderr
 
 
+def test_a_drop_reason_is_gated(tmp_path, stub, token_file):
+    """The reason goes into the server's git history, where a later drop
+    cannot reach it."""
+    r = run_client(
+        MEMO,
+        ["-g", "drop", "12", "superseded by the metastore rule"],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=deny_file(tmp_path, "metastore\n"),
+    )
+    assert r.returncode == 2
+    assert stub.requests == []
+    assert "memo -g drop <id>  drops it without a reason" in r.stderr
+
+
+@pytest.mark.parametrize("argv", [["drop", "12"], ["drop", "12", "superseded"]])
+def test_a_drop_with_a_clean_or_no_reason_is_sent(tmp_path, stub, token_file, argv):
+    r = run_client(
+        MEMO,
+        ["-g", *argv],
+        cwd=tmp_path,
+        url=stub.url,
+        token=token_file,
+        env_extra=deny_file(tmp_path, "metastore\n"),
+    )
+    assert r.returncode == 0
+    assert len(stub.requests) == 1
+
+
 @pytest.mark.parametrize(
-    "argv", [["edit", "12", "harmless"], ["merge", "1,2", "harmless"]]
+    "argv",
+    [["edit", "12", "harmless"], ["merge", "1,2", "harmless"], ["drop", "12", "ok"]],
 )
 def test_only_the_text_is_read_not_the_ids(tmp_path, stub, token_file, argv):
     r = run_client(
