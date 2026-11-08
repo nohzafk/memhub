@@ -16,7 +16,7 @@ half imported on its own.
 
 This reads LOG.txt itself instead of asking `memo`: `memo wake` prints a
 budgeted, partly summarised view of the memory, which is the opposite of what a
-migration needs. The record layout is OptMem's (`vendor/memo.py`), held here on
+migration needs. The record layout is OptMem's, held here on
 purpose — this script runs on a workstation that has no memhub checkout beside it.
 """
 

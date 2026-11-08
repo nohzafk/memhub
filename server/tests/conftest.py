@@ -1,8 +1,7 @@
 """Fixtures: a real rules store in a tmp dir.
 
 The tests drive the rules store for real, git included — it is the whole point
-of the passthrough design, and mocking it would test nothing. `vendor_dir` is
-OptMem's vendored `memo.py`, which only the migration tools' tests still use.
+of the passthrough design, and mocking it would test nothing.
 """
 
 from __future__ import annotations
@@ -17,11 +16,6 @@ from memhub.app import create_app
 from memhub.settings import Settings
 
 TOKEN = "0123456789abcdef"
-
-
-@pytest.fixture
-def vendor_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "vendor"
 
 
 @pytest.fixture

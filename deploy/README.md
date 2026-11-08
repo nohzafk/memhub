@@ -18,11 +18,11 @@ Every host, address and id is an environment variable with a placeholder default
 
 ## What is pinned, and where
 
-`pins.env` holds the versions memhub downloads — today only uv. An upgrade is an
-edit there plus a `deploy.sh` run, and no other file names a version. `deploy.sh`
-verifies each download's sha256 and refuses to install a file that does not match,
-so a moved tag or a truncated transfer fails loudly instead of producing a server
-that answers plausible nonsense.
+`pins.env` holds the versions memhub downloads — today only uv — and no other
+file names a version. `provision-ct.sh` reads it when it builds the container and
+installs uv by that version over HTTPS; no checksum is verified. It skips a uv that
+is already installed, so an edit to `pins.env` does not upgrade an existing
+container. `deploy.sh` downloads nothing and reads nothing from `pins.env`.
 
 ## Layout in the container
 

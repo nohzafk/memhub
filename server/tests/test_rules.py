@@ -218,10 +218,10 @@ def test_wake_over_budget(store: Path):
 
 
 def test_wake_over_budget_by_bytes(store: Path):
-    for i in range(100):
-        rules.note(store, f"{i:03d} " + "x" * 250)
+    for i in range(115):
+        rules.note(store, f"{i:03d} " + "x" * 270)
     out = rules.wake(store).splitlines()
-    assert out[-2].startswith("100 rules, ")
+    assert out[-2].startswith("115 rules, ")
     assert out[-1] == rules.CURATE
 
 

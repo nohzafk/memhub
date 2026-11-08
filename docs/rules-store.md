@@ -96,7 +96,7 @@ old one in the same session; the store does not link them.
 ### D4 — No compression; a size footer and a curation reminder
 
 `wake` ends with one line: `<N> rules, <M> bytes.` When the file exceeds 120
-rules or 24 KB the footer gains a second line:
+rules or 32 KB the footer gains a second line:
 `curate: the wake is over budget; merge or drop with memo merge / memo drop.`
 Nothing is refused. At the present rate (about five rules a month after the
 gates) the threshold is more than a year away.

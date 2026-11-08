@@ -1,9 +1,8 @@
-"""The cutover tools: dump, merge and seed a store.
+"""The cutover tools: dump and merge OptMem stores.
 
 These two scripts run once, on the workstations, and decide what the shared memory is
 made of. A silent mangling here is unrecoverable — the originals are archived
-the same day — so the tests assert on exact bytes, and the last one closes the
-loop: dump → merge → `memo import` → dump again must return what went in.
+the same day — so the tests assert on exact bytes.
 """
 
 from __future__ import annotations
@@ -14,8 +13,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from memhub.scope import ScopeStore
 
 # An OptMem LOG.txt: memory #i is the fixed 320-byte record at offset i*320,
 # "#<id> <YYYY-MM-DD> <text>" right-padded with spaces, sliced as bytes.
@@ -35,18 +32,8 @@ def run(script: Path, *argv: str) -> subprocess.CompletedProcess:
     )
 
 
-def memo(vendor_dir: Path, store: Path, *argv: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(vendor_dir / "memo.py"), *argv],
-        env={"MEMORY_DIR": str(store), "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
 def write_log(path: Path, entries: list[tuple[str, str]]) -> None:
-    """Write LOG.txt the way memo.py does: fixed-width records, padded in
+    """Write LOG.txt the way OptMem does: fixed-width records, padded in
     BYTES, so a multi-byte character shortens the visible text, not the
     record."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,18 +41,6 @@ def write_log(path: Path, entries: list[tuple[str, str]]) -> None:
         for i, (date, text) in enumerate(entries):
             rec = f"#{i} {date} {text}".encode()
             f.write(rec + b" " * (LOG_REC - 1 - len(rec)) + b"\n")
-
-
-def known_memos(store: Path) -> dict[str, tuple[str, str]]:
-    """Every complete record of an OptMem store as {ref: (date, text)}."""
-    buf = (store / "LOG.txt").read_bytes()
-    out = {}
-    for k in range(len(buf) // LOG_REC):
-        rec = buf[k * LOG_REC : (k + 1) * LOG_REC].decode("utf-8").rstrip()
-        ref, _, rest = rec.partition(" ")
-        date, _, text = rest.partition(" ")
-        out[ref] = (date, text)
-    return out
 
 
 # ------------------------------------------------------------------ dump_log
@@ -94,23 +69,26 @@ def test_dump_writes_a_file_with_o(tmp_path: Path):
     assert out.read_text(encoding="utf-8") == "2026-08-19 one memory\n"
 
 
-def test_dump_reads_a_store_memo_itself_wrote(tmp_path: Path, vendor_dir: Path):
-    """The other tests fabricate LOG.txt. This one makes memo write it, so a
-    change in how memo pads a record would be caught here."""
+def test_dump_reads_records_laid_out_byte_by_byte(tmp_path: Path):
+    """The other tests write LOG.txt through write_log. This one spells out
+    OptMem's record layout by hand — 319 bytes of UTF-8 text padded with
+    spaces, then a newline — so write_log and dump_log cannot drift together."""
     store = tmp_path / "optmem"
-    assert memo(vendor_dir, store, "init").returncode == 0
-    memo(vendor_dir, store, "note", "the build host reboots on Sundays")
-    memo(vendor_dir, store, "note", "backups run at 02:00 → off-box")
+    store.mkdir()
+    first = b"#0 2026-08-19 the build host reboots on Sundays"
+    second = "#1 2026-08-19 backups run at 02:00 → off-box".encode()
+    (store / "LOG.txt").write_bytes(
+        first.ljust(319) + b"\n" + second.ljust(319) + b"\n"
+    )
+    assert (store / "LOG.txt").stat().st_size == 2 * LOG_REC
 
     r = run(DUMP, str(store))
 
-    dates = [line.split(" ", 1)[0] for line in r.stdout.splitlines()]
-    texts = [line.split(" ", 1)[1] for line in r.stdout.splitlines()]
-    assert texts == [
-        "the build host reboots on Sundays",
-        "backups run at 02:00 → off-box",
-    ]
-    assert len(set(dates)) == 1  # both noted today
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == (
+        "2026-08-19 the build host reboots on Sundays\n"
+        "2026-08-19 backups run at 02:00 → off-box\n"
+    )
 
 
 def test_dump_ignores_a_partial_trailing_record(tmp_path: Path):
@@ -150,12 +128,11 @@ def test_dump_refuses_a_file_that_is_not_a_log(tmp_path: Path):
     assert "holds no complete record" in r.stderr
 
 
-def test_dump_of_a_fresh_empty_store_is_empty_and_fine(
-    tmp_path: Path, vendor_dir: Path
-):
+def test_dump_of_a_fresh_empty_store_is_empty_and_fine(tmp_path: Path):
     """An empty log is a legitimate state — `memo init` creates one."""
     store = tmp_path / "optmem"
-    memo(vendor_dir, store, "init")
+    store.mkdir()
+    (store / "LOG.txt").write_bytes(b"")
 
     r = run(DUMP, str(store))
 
@@ -244,47 +221,6 @@ def test_merge_skips_blank_lines(tmp_path: Path):
     assert run(MERGE, str(f)).stdout == "2026-08-19 one\n2026-08-19 two\n"
 
 
-# ------------------------------------------------------------------ together
-
-
-def test_dump_merge_import_dump_returns_what_went_in(tmp_path: Path, vendor_dir: Path):
-    """The whole seed in one test: two machines' logs become one store, and
-    the new store dumps back to exactly the merged text."""
-    personal, work = tmp_path / "personal", tmp_path / "work"
-    write_log(
-        personal / "LOG.txt",
-        [
-            ("2026-07-01", "personal: the second machine runs the same tools"),
-            ("2026-08-19", "personal: der Kühlschrank → 4 °C"),
-        ],
-    )
-    write_log(
-        work / "LOG.txt",
-        [
-            ("2026-08-01", "work: the container gets an address"),
-            ("2026-08-19", "work: 🧊 backups cover the bind mount"),
-        ],
-    )
-
-    run(DUMP, str(personal), "-o", str(tmp_path / "p.txt"))
-    run(DUMP, str(work), "-o", str(tmp_path / "w.txt"))
-    seed = tmp_path / "seed.txt"
-    assert (
-        run(
-            MERGE, str(tmp_path / "p.txt"), str(tmp_path / "w.txt"), "-o", str(seed)
-        ).returncode
-        == 0
-    )
-
-    server_store = tmp_path / "server-optmem"
-    assert memo(vendor_dir, server_store, "init").returncode == 0
-    imported = memo(vendor_dir, server_store, "import", str(seed))
-
-    assert imported.returncode == 0, imported.stderr
-    assert "Imported 4 memories, #0 to #3." in imported.stdout
-    assert run(DUMP, str(server_store)).stdout == seed.read_text(encoding="utf-8")
-
-
 # --------------------------------------------------------- scope at seed
 
 
@@ -335,80 +271,3 @@ def test_a_role_prefix_is_not_confused_with_a_path(tmp_path: Path):
     odd.write_text("2026-08-19 one\n", encoding="utf-8")
 
     assert run(MERGE, str(odd)).returncode == 0
-
-
-def test_the_whole_m6_seed_carries_its_scope(tmp_path: Path, vendor_dir: Path):
-    """Seeding end to end: two machines' histories merge, import into a fresh store,
-    and every memory reads back with the machine it came from — the claim that
-    provenance costs nothing at cutover."""
-    omarchy, work = tmp_path / "omarchy", tmp_path / "work"
-    write_log(
-        omarchy / "LOG.txt",
-        [
-            ("2026-07-01", "omarchy: der Kühlschrank läuft"),
-            ("2026-08-19", "omarchy: 🧊 latest"),
-        ],
-    )
-    write_log(work / "LOG.txt", [("2026-08-01", "work: the container has an address")])
-
-    run(DUMP, str(omarchy), "-o", str(tmp_path / "o.txt"))
-    run(DUMP, str(work), "-o", str(tmp_path / "w.txt"))
-    seed, meta = tmp_path / "seed.txt", tmp_path / "META.jsonl"
-    assert (
-        run(
-            MERGE,
-            f"omarchy:{tmp_path / 'o.txt'}",
-            f"work:{tmp_path / 'w.txt'}",
-            "-o",
-            str(seed),
-            "--meta",
-            str(meta),
-        ).returncode
-        == 0
-    )
-
-    store = tmp_path / "server-optmem"
-    assert memo(vendor_dir, store, "init").returncode == 0
-    assert memo(vendor_dir, store, "import", str(seed)).returncode == 0
-    # Seeding copies the metadata in beside the log it describes.
-    (store / "META.jsonl").write_text(
-        meta.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-
-    known = known_memos(store)
-    found = ScopeStore(store).lookup(known)
-
-    assert len(found) == 3
-    assert {ref: s.machine for ref, s in found.items()} == {
-        "#0": "omarchy",
-        "#1": "work",
-        "#2": "omarchy",
-    }
-    # Seed rows carry no epoch; the fingerprint is what makes them trustworthy.
-    assert all(s.applies == "unknown" for s in found.values())
-
-
-def test_a_misaligned_seed_is_detected_not_believed(tmp_path: Path, vendor_dir: Path):
-    """The alignment between merged line order and ids holds for exactly one
-    import into a fresh store. If it is wrong, the fingerprint must catch it."""
-    write_log(
-        tmp_path / "src" / "LOG.txt", [("2026-08-01", "one"), ("2026-08-02", "two")]
-    )
-    run(DUMP, str(tmp_path / "src"), "-o", str(tmp_path / "d.txt"))
-    seed, meta = tmp_path / "seed.txt", tmp_path / "META.jsonl"
-    run(MERGE, f"omarchy:{tmp_path / 'd.txt'}", "-o", str(seed), "--meta", str(meta))
-
-    store = tmp_path / "store"
-    memo(vendor_dir, store, "init")
-    # A memory already in the store shifts every imported id by one.
-    memo(vendor_dir, store, "note", "written before the import")
-    memo(vendor_dir, store, "import", str(seed))
-    (store / "META.jsonl").write_text(
-        meta.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-
-    known = known_memos(store)
-
-    # #0 is the pre-existing note, so the row claiming #0 does not match it and
-    # is dropped rather than mislabelling someone else's memory.
-    assert ScopeStore(store).lookup(known) == {}

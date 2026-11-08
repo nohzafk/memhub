@@ -73,9 +73,3 @@ the request's scope; without scope, by `memhub`.
 | `MEMHUB_DATA` | `/var/lib/memhub`; the store is `$MEMHUB_DATA/rules` |
 | `MEMHUB_TOKEN_FILE` | `/etc/memhub/token` |
 | `MEMHUB_HOST_PROJECTS` | empty — colon-separated projects whose rules are machine-bound |
-
-## Vendored tools
-
-`vendor/memo.py` is OptMem's tool, kept only for the migration tooling under
-`tools/` and its tests; the server no longer runs it. It is a copy, never
-edited here.

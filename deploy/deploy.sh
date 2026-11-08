@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install a memhub release into the container. Idempotent — run it for every
-# release, and after any change to pins.env.
+# release.
 #
 #   deploy/deploy.sh                 # full deploy, gate G1 enforced first
 #   deploy/deploy.sh --skip-checks   # skip pytest/ruff (CI already ran them)
@@ -12,8 +12,6 @@ set -euo pipefail
 
 # shellcheck source=deploy/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=deploy/pins.env
-source "$(dirname "${BASH_SOURCE[0]}")/pins.env"
 
 # sops-nix renders the shared token here on both workstations.
 TOKEN_FILE="${MEMHUB_TOKEN_FILE:-/run/secrets/memhub-token}"
@@ -58,11 +56,8 @@ push_code() {
     local tar="/tmp/memhub-release.$$.tgz"
     tar czf "$tar" -C "$(repo_root)/server" \
         --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache' \
-        --exclude='.ruff_cache' --exclude='tests' --exclude='vendor' .
+        --exclude='.ruff_cache' --exclude='tests' .
     ct_sh "mkdir -p $APP_DIR"
-    # vendor/ holds OptMem's memo.py for the migration tools' tests only; a
-    # release older than the rules store left a copy here.
-    ct_sh "rm -rf $APP_DIR/vendor"
     ct_push "$tar" /tmp/memhub-release.tgz 0600
     ct_sh "tar xzf /tmp/memhub-release.tgz -C $APP_DIR && rm -f /tmp/memhub-release.tgz"
     ct_sh "chown -R root:root $APP_DIR"
@@ -149,17 +144,6 @@ except ValueError:
     sys.exit(1)
 sys.exit(0 if body.get("ok") else 1)
 PY
-}
-
-verify_sha() {
-    sha_matches "$1" "$2" || die "$1 failed its checksum. Expected $2.
-       Refusing to install it — check pins.env against the upstream release."
-}
-
-sha_matches() {
-    local got
-    got="$(ct_sh "sha256sum '$1'" | awk '{print $1}')"
-    [[ "$got" == "$2" ]]
 }
 
 main "$@"

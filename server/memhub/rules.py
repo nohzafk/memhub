@@ -38,7 +38,7 @@ EXCLUDED = (LOCK, "META.jsonl", "EPOCH")
 
 MAX_TEXT_BYTES = 280
 BUDGET_RULES = 120
-BUDGET_BYTES = 24000
+BUDGET_BYTES = 32000
 CURATE = "curate: the wake is over budget; merge or drop with memo merge / memo drop."
 UNTAGGED = "(untagged)"
 

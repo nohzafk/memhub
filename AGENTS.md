@@ -30,8 +30,6 @@ marker rule on every run, which uses up an id and leaves commits in the history.
 server/          the FastAPI service. A uv project; its lockfile covers tools/ too
   memhub/        app.py (endpoints), runner.py (the passthrough), rules.py
                  (the store, and the local `memo` CLI), scope.py, settings.py
-  vendor/        OptMem's memo.py, for the migration tools' tests only.
-                 A COPY. See "Vendored tools" below
   tests/         drive the real rules store and git, never mock them
 client/          what a machine installs: memo-client.py,
                  memhub-mirror.sh. Stdlib only
@@ -89,13 +87,6 @@ A shared write that cannot reach the hub waits in the client's outbox
 reaches it; only text that routing and the deny list already let through enters
 it.
 
-## Vendored tools
-
-`server/vendor/memo.py` is OptMem's tool, a byte-identical copy from the Nix
-config repo. The server no longer runs it; only the migration tools' tests
-(`tests/test_cutover.py`) do, and the release leaves it out. **Never edit it
-here.** `vendor/` means a copy owned somewhere else.
-
 ## Conventions
 
 - Python via uv. `server/` is the uv project; `tools/` scripts are standalone with
@@ -109,7 +100,6 @@ here.** `vendor/` means a copy owned somewhere else.
 
 ## Do not
 
-- Do not edit anything under `server/vendor/`.
 - Do not touch the live store on any machine, and do not write agent memory from a
   subagent (see the global memory rules).
 - Do not turn a known gap into a warning in `smoke.sh`. A warning is right only
