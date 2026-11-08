@@ -80,8 +80,8 @@ the plugin keep their contract, and gains the three that a store of rules needs:
 Gone: `nap`, `zoom`, `forget`, `config`, `import`. `init` stays absent from the
 API as before; the repository is created at provisioning.
 
-`note`, `edit` and `merge` apply the same text check: non-empty, one line, at
-most 280 bytes. The server's `/run` allowlist is exactly the table above; the
+`note`, `edit` and `merge` apply the same text check: non-empty, one line (no
+line separator of any kind), no control character but TAB, at most 280 bytes. The server's `/run` allowlist is exactly the table above; the
 write verbs take the write lock; `note` and `merge` create a scope row for the
 id they create, and `edit` re-records the row of the id it kept.
 
@@ -169,8 +169,16 @@ shared call sends nothing.
 ## Decisions taken while building
 
 - A rewrite keeps the `//` and blank lines where they are; the tool writes none.
-- A malformed line in `RULES.txt` fails every read and write with exit 3,
-  naming the line, rather than being skipped.
+- A malformed line in `RULES.txt`, or an id held twice, fails every read and
+  write with exit 3, naming the line, rather than being skipped. The file is
+  split on newline only.
+- A write is all or nothing: if anything from writing the files to the commit
+  fails, both files and the index are put back as they were at HEAD.
+- An `edit` to the same text is still a commit (an empty one).
+- The server runs `recall`, whose regex is the caller's, in a child process
+  and kills it after 10 seconds: exit 124, `recall timed out`.
+- The server's scope annotation is computed from the rules in the output it
+  returns, so it always describes the text returned.
 - `init` writes `.lock`, `META.jsonl` and `EPOCH` to the repository's
   `.git/info/exclude`: the scope metadata lives beside the rules and travels with
   `/export`, but it is not the store's history.
