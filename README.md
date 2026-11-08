@@ -7,9 +7,10 @@ repository, which works until you have three machines and three different agents
 and then you have three memories that disagree. memhub is the other approach: the
 memory lives on one small always-on box, and every machine reaches the same copy.
 
-One store, `optmem`, served as `memo`: one atomic fact per line — the clue, not
-the account of it. Old memories compress into summaries, so the store an agent
-reads at the start of a session stays a fixed size.
+One store, served as `memo`: one standing rule per line — the clue, not the
+account of it. The whole store is what an agent reads at the start of a session,
+so it is curated, not compressed: a rule is edited when it was wrong, merged when
+it repeats another, and dropped when it stops being true.
 
 It holds what no single project owns: facts about machines, tools and services,
 and anything an agent working in another tool needs to know unasked. The running
@@ -24,9 +25,9 @@ $ memo recall 'dcg.*allow'
 #216 2026-08-21 dcg: an auto-discovered project .dcg.toml grants no allow (v0.6.9+).
 ```
 
-`memo` is [OptMem](https://github.com/VictorTaelin/OptMem) by Victor Taelin — a
-binary tree of memories where the old ones compress into summaries, so recall stays
-a fixed cost as the store grows. memhub adds the sharing.
+The store is a plain text file in a git repository: `#<id> <date> <text>`, one
+rule per line, and every write is one commit, so nothing edited or dropped is
+lost. memhub adds the sharing.
 
 ## How it works
 
@@ -34,8 +35,8 @@ a fixed cost as the store grows. memhub adds the sharing.
   Mac, laptop, box              the always-on host
   ┌────────────────┐            ┌──────────────────────────┐
   │ memo           │  argv over │  FastAPI                 │
-  │  (thin client) │───HTTP────▶│   └─ runs memo.py on the │
-  │                │            │      real store          │
+  │  (thin client) │───HTTP────▶│   └─ runs rules.py on    │
+  │                │            │      RULES.txt + git     │
   │  routes first  │            │                          │
   └────────────────┘            └──────────────────────────┘
 ```
@@ -53,17 +54,24 @@ arrives the text has either left the machine or it has not — and nothing furth
 along can undo it. Work under a confidential path is therefore never sent anywhere,
 rather than being sent and then filtered.
 
-The server does not reimplement the tool. `POST /run {tool, argv}` executes the
-real `memo.py` against the store, so pagination, compression prompts,
-locking and crash repair come from the tool itself. Five endpoints and no more:
-`/health`, `/run` and `/verify`, plus `/export` and `/import` for the mirror and
-the way back from it.
+The server does not reimplement the tool. `POST /run {tool, argv}` hands argv to
+the store's own parser, so the text check, the ids, the locking and the commit
+come from the tool itself — the same `rules.py` that is the `memo` of a
+machine's local store. Four endpoints and no more: `/health`, `/run`, `/verify`,
+and `/export` for the mirror.
+
+The store used to be OptMem, a diary whose old entries compress into summaries.
+Standing rules want the opposite at every point — they do not age, they get
+corrected — so it became a file of rules in git; [the design](docs/rules-store.md)
+has the reasons and the measurements.
 
 ## Why not simpler
 
-- **Why not a synced folder?** OptMem numbers memories by position, so two stores
-  that both accept writes are two identities that can never be merged. One writer,
-  many readers, is not a limitation here — it is the only correct topology.
+- **Why not a synced folder?** Ids are handed out by the store and never reused,
+  so two stores that both accept writes would give one id to two different rules.
+  One writer, many readers, is not a limitation here — it is the only correct
+  topology. A write made while the hub is unreachable waits in an outbox on the
+  machine and is sent by the next call that reaches it.
 - **Why not one store and no local option?** Some work should not leave the machine
   it was done on. A single shared store forces a choice between recording nothing
   and recording it somewhere it does not belong.
@@ -73,9 +81,10 @@ the way back from it.
 ## Layout
 
 ```text
-server/    the service. A uv project; vendor/ holds the two real tools
-client/    what a machine installs — the two routers plus the mirror puller
+server/    the service. A uv project; memhub/rules.py is the store itself
+client/    what a machine installs — the router plus the mirror puller
 tools/     operator scripts: dump, merge, promote a local store upstream
+docs/      the rules store's design
 deploy/    provisioning, deploy, smoke test, systemd units, pinned versions
 ```
 
@@ -105,8 +114,9 @@ confidential". `client/README.md` has the full list.
 
 ## Status
 
-Built and in daily use across three machines and three agents. Search
-(`memo recall`) is plain text matching.
+The rules store is built and not yet deployed; the hub in daily use across three
+machines and three agents still serves OptMem until the migration the design
+describes. Search (`memo recall`) is a regex over the rules.
 
 memhub used to serve a second store, a per-day log (`daylog`). It is no longer
 served. The day files stay in the server's data directory, untouched, and
@@ -114,12 +124,15 @@ served. The day files stay in the server's data directory, untouched, and
 
 ## Documentation
 
-- `server/README.md` — endpoints, settings, the vendored-tool checksums
+- `docs/rules-store.md` — the store's contract and why it replaced OptMem
+- `server/README.md` — endpoints, settings, scope metadata
 - `client/README.md` — routing, every environment variable, failure messages
 - `deploy/README.md` — pins, token rotation, why the units are hardened as they are
 - `AGENTS.md` — conventions and constraints, for a coding agent
 
 ## Credits
 
-[OptMem](https://github.com/VictorTaelin/OptMem) by Victor Taelin is the durable
-half and the better idea. memhub is the part that lets several machines share it.
+`memo` started as [OptMem](https://github.com/VictorTaelin/OptMem) by Victor
+Taelin: one fact per line, read whole at the start of a session, kept to a fixed
+cost. That idea is still the core of it. memhub is the part that lets several
+machines share it.

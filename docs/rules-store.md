@@ -1,6 +1,6 @@
 # The rules store: a text file replaces OptMem
 
-State: decided, not built. This document is the contract the server, the client,
+State: built on branch rules-store, not deployed. This document is the contract the server, the client,
 the Nix module that installs `memo`, and the bendcord `memory` plugin build to.
 
 ## Why
@@ -82,8 +82,8 @@ API as before; the repository is created at provisioning.
 
 `note`, `edit` and `merge` apply the same text check: non-empty, one line, at
 most 280 bytes. The server's `/run` allowlist is exactly the table above; the
-write verbs take the write lock and the three that create an id create a scope
-row, as `note` and `import` did.
+write verbs take the write lock; `note` and `merge` create a scope row for the
+id they create, and `edit` re-records the row of the id it kept.
 
 ### D3 — Ids are monotonic and never reused
 
@@ -135,7 +135,7 @@ in id order.
 A machine with `MEMHUB_LOCAL_ROOTS` keeps a local store in the same format
 (D1), and `-g`, `-l` and the cwd route exactly as before; the server still never
 learns the cwd. The deny list still reads every `note`, `edit` and `merge` text
-bound for the shared store. `memhub-promote` appends local rules to the shared
+bound for the shared store, and now a `drop`'s reason too. `memhub-promote` appends local rules to the shared
 store with new ids (position was never identity here, so this is an append, not
 a merge of identities) and archives the local store as before.
 
@@ -143,8 +143,8 @@ a merge of identities) and archives the local store as before.
 
 When routing has decided a write is shared and the hub is unreachable, the
 client appends the argv to `~/.agents/memory/outbox` (one JSON line per call)
-and says so: `memhub unreachable; queued as outbox entry <n>, sent on the next
-shared call.` The next shared call of any verb that reaches the hub first
+and says so: `memhub unreachable at <url>; queued as outbox entry <n>, sent on
+the next shared call.` The next shared call of any verb that reaches the hub first
 replays the outbox in order, each as its own request, then runs itself; an entry
 that the server refuses (a deny-list hit cannot happen here, since the client
 checked before queueing; a text check can) is dropped with its error printed.
@@ -165,6 +165,29 @@ shared call sends nothing.
   `merge`, and the outbox.
 - The Claude Code session hook and the plugin stop following `wake`
   continuation pages: the wake is one page.
+
+## Decisions taken while building
+
+- A rewrite keeps the `//` and blank lines where they are; the tool writes none.
+- A malformed line in `RULES.txt` fails every read and write with exit 3,
+  naming the line, rather than being skipped.
+- `init` writes `.lock`, `META.jsonl` and `EPOCH` to the repository's
+  `.git/info/exclude`: the scope metadata lives beside the rules and travels with
+  `/export`, but it is not the store's history.
+- `edit` re-records its scope row: the same id, the fingerprint of the stored new
+  text, the scope of the editing request; the last row of a ref wins. An `edit`
+  without scope writes none, and `/verify` reports the old row.
+- Outbox entry numbers are positions in the file, so they start again at 1 once
+  the outbox has been emptied.
+- During a replay, the line for each entry goes to stderr; the queued message of
+  a write goes to stdout, where the write's own answer would have been.
+- An HTTP error during a replay (a 401, a 409) stops it and keeps that entry and
+  the rest; the call itself proceeds.
+- Delivery is at least once: an entry whose request reached the hub but whose
+  answer was lost is sent again, and the copy is dropped by hand.
+- A `drop` reason passes the deny list, because it lands in the hub's git
+  history.
+- The container needs `git`; `deploy.sh` installs it where provisioning did not.
 
 ## What this does not do
 
