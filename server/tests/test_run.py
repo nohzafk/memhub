@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+import time
 
+import pytest
 from conftest import TOKEN
 from fastapi.testclient import TestClient
 
+from memhub import runner
 from memhub.settings import Settings
 
 
@@ -116,6 +119,30 @@ def test_argv_is_never_shell(client: TestClient):
     assert run(client, "memo", "note", hostile).json()["exit_code"] == 0
 
     assert hostile in run(client, "memo", "recall", "quoted").json()["stdout"]
+
+
+def test_a_pathological_recall_is_killed_at_the_bound(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A caller's regex runs in a child process: `(a+)+$` against a long run
+    of `a` backtracks for ever, and must not hold a server thread."""
+    monkeypatch.setattr(runner, "RECALL_TIMEOUT", 1.0)
+    run(client, "memo", "note", "a" * 100 + "!")
+
+    started = time.monotonic()
+    r = run(client, "memo", "recall", "(a+)+$")
+
+    assert time.monotonic() - started < 5
+    assert r.status_code == 200
+    assert (r.json()["exit_code"], r.json()["stderr"]) == (124, "recall timed out\n")
+
+
+def test_recall_keeps_the_tools_exit_codes_and_utf8(client: TestClient):
+    run(client, "memo", "note", "#tag ünïcode")
+    ok = run(client, "memo", "recall", "ÜNÏ").json()
+    assert ok["exit_code"] == 0
+    assert "ünïcode" in ok["stdout"]
+    assert run(client, "memo", "recall", "(").json()["exit_code"] == 2
 
 
 def test_unknown_tool_is_400(client: TestClient):

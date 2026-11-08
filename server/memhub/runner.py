@@ -1,9 +1,12 @@
 """`POST /run` — command passthrough to the rules store.
 
 The transport is argv, not a per-verb REST API: the server hands argv to the
-rules store's own parser (`rules.run`), in process, so the text check, the id
-assignment, the flock and the commit all come from the tool itself and cannot
-drift from it.
+rules store's own parser (`rules.run`), so the text check, the id assignment,
+the flock and the commit all come from the tool itself and cannot drift from it.
+
+Writes and `wake` run in process. `recall` runs the same tool as a child
+process under a timeout: its argument is a caller's regex, and a pathological
+one (`(a+)+$`) would otherwise hold a server thread for good.
 
 Nothing here goes through a shell. argv is handed to the tool's parser as a
 list, so a quote or a semicolon in a rule is text and never syntax.
@@ -12,6 +15,9 @@ list, so a quote or a semicolon in a rule is text and never syntax.
 from __future__ import annotations
 
 import fcntl
+import os
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +44,10 @@ WRITE_VERBS = {
 # `edit` for the id whose text it replaced (the row's fingerprint is of the
 # text). `drop` retires an id and writes none.
 SCOPE_RECORDING = {("memo", "note"), ("memo", "merge"), ("memo", "edit")}
+
+# Seconds a `recall` may run before it is killed and answered with exit 124.
+RECALL_TIMEOUT = 10.0
+EXIT_TIMEOUT = 124
 
 _thread_lock = threading.Lock()
 
@@ -112,7 +122,26 @@ def run(
             if recorder is not None and result.exit_code == 0:
                 recorder.commit(result.stdout)
             return result
+    if verb == "recall":
+        return _recall(argv, settings)
     return _exec(argv, settings, author)
+
+
+def _recall(argv: list[str], settings: Settings) -> RunResult:
+    """`rules.py recall` in a child process, killed after `RECALL_TIMEOUT`."""
+    env = dict(os.environ, MEMORY_DIR=str(settings.rules_dir), PYTHONUTF8="1")
+    try:
+        p = subprocess.run(
+            [sys.executable, rules.__file__, *argv],
+            env=env,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=RECALL_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return RunResult(EXIT_TIMEOUT, "", "recall timed out\n")
+    return RunResult(p.returncode, p.stdout, p.stderr)
 
 
 def _exec(argv: list[str], settings: Settings, author: str | None) -> RunResult:
